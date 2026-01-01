@@ -12,7 +12,7 @@ PASSWORD = os.getenv("PASSWORD", "changeme")
 DEEPSEEK_API_KEY = os.getenv("DEEPSEEK_API_KEY", "")
 
 def verify_token(credentials: HTTPAuthorizationCredentials = Depends(security)):
-    if credentials.credential != PASSWORD:
+    if credentials.credentials != PASSWORD:
         raise HTTPException(status_code=401, detail="Invalid token")
     return credentials
 
