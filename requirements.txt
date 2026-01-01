@@ -1,3 +1,4 @@
-crawl4ai
 fastapi
-uvicorn[standard]
+uvicorn
+crawl4ai
+httpx
