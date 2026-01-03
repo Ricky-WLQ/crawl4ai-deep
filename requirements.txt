@@ -1,4 +1,7 @@
 fastapi
 uvicorn
-crawl4ai
 httpx
+pydantic
+crawl4ai
+sentence-transformers
+redis
