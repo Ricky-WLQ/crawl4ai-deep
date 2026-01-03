@@ -44,7 +44,7 @@ Return ONLY valid JSON, no explanation:
 Keep each list to 10-15 single-word keywords, lowercase only."""
 
     try:
-        async with httpx.AsyncClient(timeout=30.0) as client:
+        async with httpx.AsyncClient(timeout=300.0) as client:
             response = await client.post(
                 "https://api.deepseek.com/v1/chat/completions",
                 headers={
