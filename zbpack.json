@@ -1,5 +1,11 @@
 {
+  "build_type": "dockerfile",
+  "dockerfile": "Dockerfile",
   "python": {
     "version": "3.11"
-  }
+  },
+  "env": {
+    "PORT": "8080"
+  },
+  "start_command": "python main.py"
 }
