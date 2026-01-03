@@ -1,5 +1,5 @@
-# Web Crawling
-crawl4ai>=0.7.0
+# Web Crawling - includes AdaptiveCrawler
+crawl4ai>=0.7.8
 
 # Web Framework
 fastapi>=0.100.0
@@ -8,14 +8,5 @@ uvicorn[standard]>=0.23.0
 # DeepSeek API (OpenAI-compatible)
 openai>=1.0.0
 
-# Multilingual Embedding Model
-sentence-transformers>=2.2.0
-torch>=2.0.0
-
 # Data validation
 pydantic>=2.0.0
-
-# Additional utilities
-httpx>=0.24.0
-lxml>=4.9.0
-numpy>=1.24.0
