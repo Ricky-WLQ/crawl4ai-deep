@@ -5,8 +5,11 @@ from typing import Optional
 import os
 import httpx
 import traceback
+import re
+import asyncio
+import json
 
-app = FastAPI(title="Crawl4AI Adaptive Crawler")
+app = FastAPI(title="Crawl4AI AI-Guided Crawler")
 security = HTTPBearer()
 
 PASSWORD = os.getenv("PASSWORD", "changeme")
@@ -22,13 +25,150 @@ class CrawlRequest(BaseModel):
     mode: str = "adaptive"
     adaptive_crawler_config: Optional[dict] = None
 
+async def get_ai_keywords(query: str) -> dict:
+    """Ask AI to generate relevant and irrelevant keywords for the query"""
+    
+    if not DEEPSEEK_API_KEY or not query:
+        return {"relevant": [], "irrelevant": []}
+    
+    prompt = f"""Given this search query: "{query}"
+
+Generate two lists of URL path keywords:
+
+1. RELEVANT: Keywords that would likely appear in URLs containing useful information for this query
+2. IRRELEVANT: Keywords that would likely appear in URLs NOT useful for this query
+
+Return ONLY valid JSON, no explanation:
+{{"relevant": ["keyword1", "keyword2", ...], "irrelevant": ["keyword1", "keyword2", ...]}}
+
+Keep each list to 10-15 single-word keywords, lowercase only."""
+
+    try:
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(
+                "https://api.deepseek.com/v1/chat/completions",
+                headers={
+                    "Authorization": f"Bearer {DEEPSEEK_API_KEY}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": "deepseek-chat",
+                    "messages": [
+                        {"role": "system", "content": "You are a helpful assistant that returns only valid JSON."},
+                        {"role": "user", "content": prompt}
+                    ],
+                    "max_tokens": 300
+                }
+            )
+            
+            if response.status_code == 200:
+                result = response.json()
+                content = result["choices"][0]["message"]["content"]
+                
+                content = content.strip()
+                if content.startswith("```"):
+                    lines = content.split("\n")
+                    content = "\n".join(lines[1:-1])
+                
+                keywords = json.loads(content)
+                return keywords
+            
+    except Exception as e:
+        print(f"AI keywords error: {e}")
+    
+    # Fallback defaults
+    return {
+        "relevant": ["docs", "guide", "tutorial", "api", "reference", "example", "faq"],
+        "irrelevant": ["login", "signup", "cart", "checkout", "account", "privacy", "terms", "cookie"]
+    }
+
+def extract_relevant_content(content: str, query: str, context_lines: int = 2) -> str:
+    """Extract only paragraphs/sections relevant to the query"""
+    
+    if not query or not content:
+        return content[:1000]
+    
+    query_terms = []
+    for term in query.split():
+        term_clean = term.strip('?.,!').lower()
+        if len(term_clean) > 2:
+            query_terms.append(term_clean)
+    
+    punycode_pattern = re.findall(r'xn--[a-z0-9]+', query.lower())
+    query_terms.extend(punycode_pattern)
+    
+    lines = content.split('\n')
+    
+    relevant_sections = []
+    matched_indices = set()
+    
+    for i, line in enumerate(lines):
+        line_lower = line.lower()
+        
+        for term in query_terms:
+            if term in line_lower:
+                matched_indices.add(i)
+                break
+    
+    for idx in sorted(matched_indices):
+        start = max(0, idx - context_lines)
+        end = min(len(lines), idx + context_lines + 1)
+        
+        section_lines = lines[start:end]
+        section = '\n'.join(line for line in section_lines if line.strip())
+        
+        if section and section not in relevant_sections:
+            relevant_sections.append(section)
+    
+    if relevant_sections:
+        return '\n\n---\n\n'.join(relevant_sections)
+    else:
+        return "[No content matching query terms found on this page]"
+
+def score_url_relevance(url: str, link_text: str, query: str, ai_keywords: dict = None) -> float:
+    """Score a URL based on how relevant it might be to the query"""
+    if not query:
+        return 0.5
+    
+    query_lower = query.lower()
+    url_lower = url.lower()
+    link_text_lower = link_text.lower() if link_text else ""
+    
+    score = 0.0
+    query_terms = [t for t in query_lower.split() if len(t) > 3]
+    
+    # Direct query term matches
+    for term in query_terms:
+        if term in url_lower:
+            score += 2.0
+        if term in link_text_lower:
+            score += 1.5
+    
+    # AI-generated keywords
+    if ai_keywords:
+        for keyword in ai_keywords.get("relevant", []):
+            if keyword in url_lower or keyword in link_text_lower:
+                score += 1.0
+        
+        for keyword in ai_keywords.get("irrelevant", []):
+            if keyword in url_lower:
+                score -= 1.5
+    
+    return max(0, score)
+
+def get_base_domain(url: str) -> str:
+    """Extract base domain from URL"""
+    from urllib.parse import urlparse
+    parsed = urlparse(url)
+    return f"{parsed.scheme}://{parsed.netloc}"
+
 async def ask_deepseek(query: str, context: str) -> str:
-    """Send crawled content to DeepSeek-Reasoner"""
+    """Send crawled content to DeepSeek for answer"""
     
     if not DEEPSEEK_API_KEY:
         return "Error: DEEPSEEK_API_KEY not configured"
     
-    context = context[:50000]  # Increased context limit
+    context = context[:50000]
     
     prompt = f"""Based on the following web content, please answer this question:
 
@@ -57,7 +197,7 @@ async def ask_deepseek(query: str, context: str) -> str:
                         {"role": "system", "content": "You are a helpful research assistant."},
                         {"role": "user", "content": prompt}
                     ],
-                    "max_tokens": 4000
+                    "max_tokens": 2000
                 }
             )
             
@@ -72,7 +212,7 @@ async def ask_deepseek(query: str, context: str) -> str:
 
 @app.get("/")
 async def root():
-    return {"message": "Crawl4AI Adaptive Crawler is running!", "deepseek_configured": bool(DEEPSEEK_API_KEY)}
+    return {"message": "Crawl4AI AI-Guided Crawler", "deepseek_configured": bool(DEEPSEEK_API_KEY)}
 
 @app.post("/crawl")
 async def crawl(request: CrawlRequest, credentials: HTTPAuthorizationCredentials = Depends(verify_token)):
@@ -83,37 +223,41 @@ async def crawl(request: CrawlRequest, credentials: HTTPAuthorizationCredentials
         
         config = request.adaptive_crawler_config or {}
         query = config.get("query", "")
-        max_pages = config.get("max_pages", 5)
+        max_pages = config.get("max_pages", 10)
         use_ai = config.get("use_ai", True)
+        stay_on_domain = config.get("stay_on_domain", True)
+        delay_between_requests = config.get("delay", 0.5)
         
-        # Browser config - headless mode
+        # 🧠 Get AI-generated keywords for this specific query
+        ai_keywords = await get_ai_keywords(query) if query else {}
+        
+        allowed_domains = [get_base_domain(url) for url in request.urls]
+        
         browser_config = BrowserConfig(
             headless=True,
-            verbose=False
+            verbose=False,
+            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
         )
         
-        # Content filter - removes boilerplate, keeps only main content
         content_filter = PruningContentFilter(
-            threshold=0.4,  # Lower = more content kept, Higher = stricter filtering
+            threshold=0.4,
             threshold_type="fixed",
-            min_word_threshold=20  # Minimum words per block to keep
+            min_word_threshold=20
         )
         
-        # Markdown generator - clean output
         markdown_generator = DefaultMarkdownGenerator(
             content_filter=content_filter,
             options={
-                "ignore_links": True,  # Remove link clutter
-                "ignore_images": True,  # Remove image references
-                "body_width": 0  # No text wrapping
+                "ignore_links": False,
+                "ignore_images": True,
+                "body_width": 0
             }
         )
         
-        # Crawler config with smart extraction
         crawl_config = CrawlerRunConfig(
             markdown_generator=markdown_generator,
             excluded_tags=["nav", "header", "footer", "aside", "script", "style", "noscript", "iframe", "form"],
-            exclude_external_links=True,
+            exclude_external_links=stay_on_domain,
             exclude_social_media_links=True,
             remove_overlay_elements=True,
             process_iframes=False
@@ -121,95 +265,118 @@ async def crawl(request: CrawlRequest, credentials: HTTPAuthorizationCredentials
         
         crawled_pages = []
         visited_urls = set()
-        urls_to_crawl = list(request.urls)
+        urls_to_crawl = [(0, url, "") for url in request.urls]
         all_content = []
         
         async with AsyncWebCrawler(config=browser_config) as crawler:
             while urls_to_crawl and len(crawled_pages) < max_pages:
-                current_url = urls_to_crawl.pop(0)
+                urls_to_crawl.sort(key=lambda x: x[0], reverse=True)
+                priority_score, current_url, _ = urls_to_crawl.pop(0)
                 
                 if current_url in visited_urls or not current_url:
                     continue
+                
+                if stay_on_domain:
+                    url_domain = get_base_domain(current_url)
+                    if url_domain not in allowed_domains:
+                        continue
                     
                 visited_urls.add(current_url)
+                
+                if delay_between_requests > 0 and len(crawled_pages) > 0:
+                    await asyncio.sleep(delay_between_requests)
                 
                 try:
                     result = await crawler.arun(url=current_url, config=crawl_config)
                     
                     if result.success:
-                        # Use fit_markdown (filtered) if available, otherwise regular markdown
                         markdown_content = getattr(result, 'markdown_v2', None)
                         if markdown_content and hasattr(markdown_content, 'fit_markdown'):
                             clean_content = markdown_content.fit_markdown or ""
                         else:
                             clean_content = result.markdown or ""
                         
-                        # Additional cleanup - remove empty lines and extra whitespace
                         lines = clean_content.split('\n')
                         clean_lines = [line.strip() for line in lines if line.strip()]
                         clean_content = '\n'.join(clean_lines)
                         
-                        # Score based on query match
+                        relevant_content = extract_relevant_content(clean_content, query)
+                        
                         score = 0
                         if query:
                             query_lower = query.lower()
                             content_lower = clean_content.lower()
-                            # Check for query terms
                             query_terms = query_lower.split()
                             matches = sum(1 for term in query_terms if term in content_lower)
                             score = matches / len(query_terms) if query_terms else 0
                         
-                        # Get title
                         title = ""
                         if hasattr(result, 'metadata') and result.metadata:
                             title = result.metadata.get("title", "")
                         
-                        # Store FULL clean content (no truncation for AI)
                         if clean_content:
                             all_content.append(f"## Source: {current_url}\n\n{clean_content}")
                         
-                        # Follow internal links
                         links_found = 0
                         if hasattr(result, 'links') and result.links:
                             internal = result.links.get("internal", [])
                             links_found = len(internal)
-                            for link in internal[:10]:
-                                link_url = link.get("href", "") if isinstance(link, dict) else str(link)
-                                if link_url and link_url not in visited_urls and link_url not in urls_to_crawl:
-                                    urls_to_crawl.append(link_url)
+                            
+                            for link in internal[:20]:
+                                if isinstance(link, dict):
+                                    link_url = link.get("href", "")
+                                    link_text = link.get("text", "")
+                                else:
+                                    link_url = str(link)
+                                    link_text = ""
+                                
+                                if link_url and link_url not in visited_urls:
+                                    already_queued = any(u[1] == link_url for u in urls_to_crawl)
+                                    if not already_queued:
+                                        # 🧠 Use AI keywords for scoring!
+                                        url_score = score_url_relevance(link_url, link_text, query, ai_keywords)
+                                        urls_to_crawl.append((url_score, link_url, link_text))
+                        
+                        has_relevant = "[No content matching" not in relevant_content
                         
                         crawled_pages.append({
                             "url": current_url,
-                            "score": round(score, 2),
                             "title": title,
-                            "content_length": len(clean_content),
-                            "content": clean_content,  # ← Full content, not truncated!
+                            "relevance_score": round(score, 2),
+                            "has_matching_content": has_relevant,
+                            "relevant_content": relevant_content,
+                            "full_page_length": len(clean_content),
                             "links_found": links_found
+                        })
+                    else:
+                        crawled_pages.append({
+                            "url": current_url,
+                            "relevance_score": 0,
+                            "error": f"Failed: {result.error_message if hasattr(result, 'error_message') else 'Unknown'}"
                         })
                         
                 except Exception as e:
                     crawled_pages.append({
                         "url": current_url,
-                        "score": 0,
+                        "relevance_score": 0,
                         "error": str(e)
                     })
         
-        # Send ALL content to AI (not truncated)
         ai_answer = ""
         if use_ai and query and all_content:
             combined = "\n\n---\n\n".join(all_content)
             ai_answer = await ask_deepseek(query, combined)
         
-        total_score = sum(p.get("score", 0) for p in crawled_pages)
-        avg_confidence = total_score / len(crawled_pages) if crawled_pages else 0
+        pages_with_matches = [p for p in crawled_pages if p.get("has_matching_content", False)]
         
         return {
             "success": True,
             "query": query,
+            "ai_keywords_used": ai_keywords,  # 👈 Show what AI decided!
             "answer": ai_answer,
-            "confidence": round(avg_confidence, 2),
             "pages_crawled": len(crawled_pages),
-            "total_content_extracted": sum(p.get("content_length", 0) for p in crawled_pages),
+            "pages_with_matches": len(pages_with_matches),
+            "domains_crawled": list(allowed_domains),
             "sources": crawled_pages
         }
         
