@@ -4,11 +4,8 @@ FROM python:3.11-slim
 ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
-ENV TRANSFORMERS_CACHE=/app/.cache/huggingface
-ENV HF_HOME=/app/.cache/huggingface
-ENV SENTENCE_TRANSFORMERS_HOME=/app/.cache/sentence_transformers
 
-# Install system dependencies for Playwright/Chromium and ML libraries
+# Install system dependencies for Playwright/Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
     gnupg \
@@ -44,33 +41,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libpango-1.0-0 \
     libpangocairo-1.0-0 \
     libcairo2 \
-    # Build tools
-    gcc \
-    g++ \
-    # For torch/numpy
-    libgomp1 \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
-
-# Create cache directories
-RUN mkdir -p /app/.cache/huggingface /app/.cache/sentence_transformers
 
 # Copy requirements first for Docker layer caching
 COPY requirements.txt .
 
 # Install Python dependencies
-# Install PyTorch CPU version first (smaller, sufficient for inference)
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu && \
     pip install --no-cache-dir -r requirements.txt
 
 # Run crawl4ai setup to install browsers
 RUN crawl4ai-setup
-
-# Pre-download the embedding model during build (optional but recommended)
-# This caches the model in the image, reducing startup time
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-mpnet-base-v2')" || true
 
 # Copy application code
 COPY . .
@@ -86,7 +69,7 @@ USER appuser
 EXPOSE 8080
 
 # Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=120s --retries=3 \
+HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
     CMD python -c "import urllib.request; urllib.request.urlopen('http://localhost:8080/health')" || exit 1
 
 # Start the application
