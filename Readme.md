@@ -1,70 +1,16 @@
-# Crawl4AI Adaptive Crawler with Embedding-Based Relevance Scoring
+# Crawl4AI Adaptive Crawler with DeepSeek
 
-An intelligent web crawler that uses **embedding-based semantic similarity** for adaptive crawling and **DeepSeek** for AI-powered answer generation.
+An intelligent web crawler using Crawl4AI's official **AdaptiveCrawler** API with **DeepSeek** for AI-powered answer generation.
 
-## 🌟 Key Features
+## 🌟 Features
 
-### Embedding-Based Relevance Scoring
-- Uses `paraphrase-multilingual-mpnet-base-v2` for semantic understanding
-- **50+ language support** - works with any language
-- Scores URLs and content by semantic similarity to your query
-- More accurate than keyword matching for understanding intent
-
-### Adaptive Crawling
-- **BestFirstCrawlingStrategy**: Prioritizes most relevant pages
-- Intelligent link following based on semantic relevance
-- Configurable depth, page limits, and score thresholds
-
-### DeepSeek Integration
-- Uses `deepseek-chat` model for answer generation
-- Processes crawled content and provides direct answers
-- Content ranked by relevance before processing
-
-## 🏗️ Architecture
-
-```
-┌─────────────────────────────────────────────────────────────┐
-│                        User Query                           │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│              Embedding Model (Multilingual)                 │
-│         paraphrase-multilingual-mpnet-base-v2               │
-│                    (50+ languages)                          │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                    Query Embedding
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│              BestFirstCrawlingStrategy                      │
-│    ┌──────────────────────────────────────────────────┐    │
-│    │      EmbeddingRelevanceScorer                    │    │
-│    │  - Scores URLs by semantic similarity            │    │
-│    │  - Prioritizes most relevant links               │    │
-│    └──────────────────────────────────────────────────┘    │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                    Crawled Pages
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│           Content Relevance Scoring (Embeddings)            │
-│         Re-ranks pages by content similarity                │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                   Ranked Content
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    DeepSeek Chat                            │
-│           Generates direct answer from content              │
-└─────────────────────────────────────────────────────────────┘
-                              │
-                              ▼
-                      Plain Text Answer
-```
+- **Official AdaptiveCrawler API**: Uses crawl4ai's built-in adaptive crawling
+- **Two Strategies**:
+  - `statistical`: Fast keyword-based relevance (default)
+  - `embedding`: Semantic understanding with embeddings
+- **Confidence-based Stopping**: Automatically stops when sufficient information gathered
+- **Intelligent Link Selection**: Follows only the most relevant links
+- **DeepSeek Integration**: Generates direct answers from crawled content
 
 ## 🚀 Setup
 
@@ -77,185 +23,171 @@ An intelligent web crawler that uses **embedding-based semantic similarity** for
 
 ### Zeabur Deployment
 
-1. Connect your GitHub repository (`crawl4ai-adaptive`) to Zeabur
-2. Zeabur will automatically detect the Dockerfile
-3. Add `DEEPSEEK_API_KEY` in Zeabur dashboard → Environment Variables
+1. Push code to your GitHub repository
+2. Connect to Zeabur
+3. Add `DEEPSEEK_API_KEY` in Variables tab
 4. Deploy!
-
-### First Request
-
-After deployment, call the warmup endpoint to pre-load the embedding model:
-```bash
-curl -X POST https://your-app.zeabur.app/warmup
-```
 
 ## 📡 API Endpoints
 
-### `GET /`
-Service status and available endpoints.
-
-### `GET /health`
-Health check - shows embedding model and DeepSeek status.
-
-### `POST /warmup`
-Pre-load the embedding model to reduce first-request latency.
-
 ### `POST /crawl`
-Main adaptive crawling endpoint with embedding-based scoring.
+
+Main adaptive crawling endpoint.
 
 **Request Body:**
 ```json
 {
   "start_url": "https://example.com",
   "query": "What are the pricing plans?",
-  "max_depth": 2,
-  "max_pages": 15,
-  "include_external": false,
-  "score_threshold": 0.3,
-  "use_keywords_fallback": false
+  "max_pages": 20,
+  "confidence_threshold": 0.7,
+  "top_k_links": 3,
+  "min_gain_threshold": 0.1,
+  "strategy": "statistical"
 }
 ```
 
 **Parameters:**
+
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `start_url` | string | required | Starting URL to crawl |
 | `query` | string | required | Question or topic to search for |
-| `max_depth` | int | 2 | Crawl depth (1-5) |
-| `max_pages` | int | 15 | Maximum pages to crawl (1-50) |
-| `include_external` | bool | false | Follow external domain links |
-| `score_threshold` | float | 0.3 | Minimum relevance score (0-1) |
-| `use_keywords_fallback` | bool | false | Use keyword scoring instead of embeddings |
+| `max_pages` | int | 20 | Maximum pages to crawl (1-50) |
+| `confidence_threshold` | float | 0.7 | Stop when confidence reaches this (0.1-1.0) |
+| `top_k_links` | int | 3 | Links to follow per page (1-10) |
+| `min_gain_threshold` | float | 0.1 | Minimum info gain to continue (0.0-0.5) |
+| `strategy` | string | "statistical" | "statistical" or "embedding" |
 
 **Response:**
 ```json
 {
   "success": true,
-  "answer": "Based on the website, there are three pricing tiers...",
+  "answer": "Based on the website, the pricing plans include...",
+  "confidence": 0.85,
   "pages_crawled": 8,
   "relevant_pages": [
     {
       "url": "https://example.com/pricing",
-      "title": "Pricing - Example",
-      "relevance_score": 0.8721,
-      "content_preview": "Our pricing plans include...",
-      "depth": 1
+      "score": 0.92,
+      "content_preview": "Our pricing starts at..."
     }
   ],
   "query": "What are the pricing plans?",
-  "message": "Successfully crawled 8 pages using embedding-based scoring",
-  "scoring_method": "embedding"
+  "message": "Successfully crawled 8 pages with 85% confidence",
+  "strategy": "statistical"
 }
 ```
 
-### `POST /crawl/simple`
-Single-page crawl with embedding scoring and DeepSeek analysis.
+### `GET /health`
 
-**Query Parameters:**
-- `url`: URL to crawl
-- `query`: Question to answer
+Health check endpoint.
+
+### `GET /`
+
+Service info and available endpoints.
 
 ## 🔧 How It Works
 
-### 1. Query Embedding
-Your query is converted to a 768-dimensional vector using the multilingual embedding model.
-
-### 2. URL Scoring (Pre-crawl)
-- Each discovered URL is scored by semantic similarity
-- The `EmbeddingRelevanceScorer` combines:
-  - Link anchor text
-  - URL path segments
-  - Surrounding context
-- `BestFirstCrawlingStrategy` visits highest-scoring URLs first
-
-### 3. Content Scoring (Post-crawl)
-- All crawled page content is embedded
-- Cosine similarity calculated against query embedding
-- Pages re-ranked by content relevance
-
-### 4. Answer Generation
-- Top relevant pages sent to DeepSeek
-- DeepSeek synthesizes information into a direct answer
-
-## 🌍 Multilingual Support
-
-The embedding model supports 50+ languages:
-- Arabic, Bulgarian, Catalan, Czech, Danish, German, Greek, English, Spanish, Estonian, Persian, Finnish, French, Hebrew, Hindi, Hungarian, Indonesian, Italian, Japanese, Korean, Lithuanian, Latvian, Dutch, Norwegian, Polish, Portuguese, Romanian, Russian, Slovak, Slovenian, Swedish, Thai, Turkish, Ukrainian, Vietnamese, Chinese, and more!
-
-**Example multilingual queries:**
-- English: "What are the pricing plans?"
-- Spanish: "¿Cuáles son los planes de precios?"
-- Japanese: "価格プランは何ですか？"
-- German: "Was sind die Preispläne?"
-
-## 📊 Scoring Methods
-
-### Embedding-Based (Default)
-- **Pros**: Understands semantic meaning, handles synonyms, multilingual
-- **Cons**: Slightly slower, requires model loading
-- Uses: `paraphrase-multilingual-mpnet-base-v2`
-
-### Keyword-Based (Fallback)
-- **Pros**: Fast, no model required
-- **Cons**: Exact matching only, misses synonyms
-- Enable with: `"use_keywords_fallback": true`
-
-## 🐳 Local Development
-
-```bash
-# Install dependencies
-pip install -r requirements.txt
-
-# Run crawl4ai setup
-crawl4ai-setup
-
-# Set environment variable
-export DEEPSEEK_API_KEY=your_api_key_here
-
-# Run the server
-python main.py
+```
+Query: "What are the pricing options?"
+           │
+           ▼
+┌──────────────────────────┐
+│   AdaptiveCrawler        │
+│   (statistical/embedding)│
+└──────────────────────────┘
+           │
+           ▼
+┌──────────────────────────┐
+│ Intelligent Link         │ → Follows top_k most relevant links
+│ Selection                │
+└──────────────────────────┘
+           │
+           ▼
+┌──────────────────────────┐
+│ Confidence Scoring       │ → Stops at confidence_threshold
+└──────────────────────────┘
+           │
+           ▼
+┌──────────────────────────┐
+│ get_relevant_content()   │ → Returns scored pages
+└──────────────────────────┘
+           │
+           ▼
+┌──────────────────────────┐
+│ DeepSeek Chat            │ → Generates answer
+└──────────────────────────┘
 ```
 
-Access the API docs at `http://localhost:8080/docs`
+## 📊 Strategies
+
+### Statistical (Default)
+- Fast, keyword-based matching
+- Good for exact term searches
+- Lower resource usage
+
+### Embedding
+- Semantic understanding
+- Finds conceptually related content
+- Better for natural language queries
+- Requires more resources
+
+## 🔗 n8n Integration
+
+**HTTP Request Node Settings:**
+- Method: `POST`
+- URL: `https://your-app.zeabur.app/crawl`
+- Body Content Type: `JSON`
+- Timeout: `100000` (100 seconds)
+
+**JSON Body:**
+```json
+{
+  "start_url": "{{ $json.url }}",
+  "query": "{{ $json.question }}",
+  "max_pages": 15,
+  "strategy": "statistical"
+}
+```
 
 ## 📝 Example Usage
+
+### cURL
+```bash
+curl -X POST "https://crawl4ai-adaptive.zeabur.app/crawl" \
+  -H "Content-Type: application/json" \
+  -d '{
+    "start_url": "https://docs.example.com",
+    "query": "How do I authenticate?",
+    "max_pages": 15
+  }'
+```
 
 ### Python
 ```python
 import requests
 
 response = requests.post(
-    "https://your-app.zeabur.app/crawl",
+    "https://crawl4ai-adaptive.zeabur.app/crawl",
     json={
         "start_url": "https://docs.example.com",
-        "query": "How do I authenticate API requests?",
-        "max_depth": 2,
-        "max_pages": 20
-    }
+        "query": "How do I authenticate?",
+        "max_pages": 15,
+        "strategy": "statistical"
+    },
+    timeout=120
 )
 
 result = response.json()
 print(result["answer"])
 ```
 
-### cURL
-```bash
-curl -X POST "https://your-app.zeabur.app/crawl" \
-  -H "Content-Type: application/json" \
-  -d '{
-    "start_url": "https://docs.example.com",
-    "query": "How do I authenticate API requests?",
-    "max_depth": 2,
-    "max_pages": 20
-  }'
-```
-
 ## ⚙️ Performance Notes
 
-- **First request**: ~30-60s (model loading)
-- **Subsequent requests**: ~5-30s (depending on pages crawled)
-- **Warmup endpoint**: Call `/warmup` after deployment to pre-load model
-- **Memory**: ~2GB for embedding model + browser
+- **Typical response time**: 10-60 seconds depending on site complexity
+- **Timeout recommendation**: 100+ seconds in n8n/clients
+- **For faster results**: Use lower `max_pages` and `confidence_threshold`
 
 ## 📄 License
 
