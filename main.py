@@ -1,7 +1,8 @@
 """
-Crawl4AI Adaptive Crawler with DeepSeek + Sentence-Transformers
-Uses Crawl4AI v0.7.8 adaptive crawling with embedding strategy.
-OpenRouter for LLM calls, DeepSeek-reasoner for answer generation.
+Crawl4AI Adaptive Crawler
+- OpenRouter for embeddings (sentence-transformers/all-minilm-l12-v2)
+- DeepSeek for LLM operations and answer generation
+All cloud APIs - no local ML dependencies.
 """
 
 import os
@@ -36,6 +37,7 @@ async def lifespan(app: FastAPI):
     print("=" * 50, flush=True)
     print("Crawl4AI Adaptive Crawler Starting...", flush=True)
     print(f"Adaptive Crawling Available: {ADAPTIVE_AVAILABLE}", flush=True)
+    print("All operations use cloud APIs (OpenRouter + DeepSeek)", flush=True)
     print("=" * 50, flush=True)
     yield
     print("Shutting down...", flush=True)
@@ -44,7 +46,7 @@ async def lifespan(app: FastAPI):
 # Initialize FastAPI app with lifespan
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
-    description="Intelligent web crawler with Sentence-Transformers embeddings and DeepSeek reasoning",
+    description="Intelligent web crawler using OpenRouter embeddings and DeepSeek reasoning",
     version="1.0.0",
     lifespan=lifespan
 )
@@ -162,9 +164,10 @@ async def root():
         "version": "1.0.0",
         "adaptive_available": ADAPTIVE_AVAILABLE,
         "features": [
-            "Sentence-Transformers embeddings (all-MiniLM-L12-v2)",
-            "OpenRouter for LLM operations",
-            "DeepSeek-reasoner for answer generation"
+            "OpenRouter embeddings (sentence-transformers/all-minilm-l12-v2)",
+            "DeepSeek for LLM operations",
+            "DeepSeek-reasoner for answer generation",
+            "All cloud APIs - no local ML dependencies"
         ]
     }
 
@@ -200,27 +203,36 @@ async def adaptive_crawl(request: CrawlRequest):
         )
 
     try:
-        # Configure LLM for embedding strategy using OpenRouter
-        llm_config = LLMConfig(
-            provider="openrouter/google/gemini-2.0-flash-001",
+        # Configure OpenRouter for embeddings (cloud API)
+        embedding_config = LLMConfig(
+            provider="openrouter/sentence-transformers/all-minilm-l12-v2",
             api_token=openrouter_api_key,
             base_url="https://openrouter.ai/api/v1"
         )
 
-        # Use embedding strategy with sentence-transformers
+        # Configure DeepSeek for LLM operations (query variations, relevance scoring)
+        llm_config = LLMConfig(
+            provider="deepseek/deepseek-chat",
+            api_token=deepseek_api_key,
+            base_url="https://api.deepseek.com"
+        )
+
+        # Use embedding strategy with cloud APIs
         config = AdaptiveConfig(
             confidence_threshold=request.confidence_threshold,
             max_pages=request.max_pages,
             top_k_links=request.top_k_links,
             min_gain_threshold=request.min_gain_threshold,
             strategy="embedding",
-            embedding_model="sentence-transformers/all-MiniLM-L12-v2",
-            embedding_llm_config=llm_config
+            embedding_model="openrouter/sentence-transformers/all-minilm-l12-v2",
+            embedding_llm_config=embedding_config,
+            llm_config=llm_config
         )
 
         print(f"\nStarting adaptive crawl for: {request.query}", flush=True)
         print(f"Starting URL: {request.start_url}", flush=True)
-        print(f"Strategy: embedding (all-MiniLM-L12-v2) with OpenRouter", flush=True)
+        print("Embeddings: OpenRouter (sentence-transformers/all-minilm-l12-v2)", flush=True)
+        print("LLM: DeepSeek", flush=True)
 
         async with AsyncWebCrawler() as crawler:
             adaptive = AdaptiveCrawler(crawler, config)
