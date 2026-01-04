@@ -1,16 +1,31 @@
 """
 Crawl4AI Adaptive Crawler with DeepSeek + Sentence-Transformers
 Uses Crawl4AI v0.7.8 adaptive crawling with embedding strategy.
-Intelligently crawls websites, finds relevant information, and provides direct answers.
 """
 
 import os
+import sys
 from typing import Optional, List
 
 import httpx
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel
-from crawl4ai import AsyncWebCrawler, AdaptiveCrawler, AdaptiveConfig, LLMConfig
+
+# Test imports at startup
+try:
+    from crawl4ai import AsyncWebCrawler
+    print("AsyncWebCrawler imported successfully")
+except ImportError as e:
+    print(f"Failed to import AsyncWebCrawler: {e}")
+    sys.exit(1)
+
+try:
+    from crawl4ai import AdaptiveCrawler, AdaptiveConfig
+    ADAPTIVE_AVAILABLE = True
+    print("AdaptiveCrawler and AdaptiveConfig imported successfully")
+except ImportError as e:
+    print(f"AdaptiveCrawler not available: {e}")
+    ADAPTIVE_AVAILABLE = False
 
 # Initialize FastAPI app
 app = FastAPI(
@@ -34,10 +49,10 @@ class CrawlRequest(BaseModel):
 class CrawlResponse(BaseModel):
     """Response model with direct answer."""
     success: bool
-    answer: str  # Direct plain text answer from DeepSeek
+    answer: str
     confidence: float
     pages_crawled: int
-    sources: List[dict]  # URLs and relevance scores
+    sources: List[dict]
     message: str
 
 
@@ -47,10 +62,7 @@ async def call_deepseek(
     api_key: str,
     max_tokens: int = 2000
 ) -> str:
-    """
-    Call DeepSeek API to generate an answer based on crawled content.
-    Uses deepseek-reasoner for advanced reasoning.
-    """
+    """Call DeepSeek API to generate an answer."""
 
     system_prompt = """You are a helpful assistant that provides direct, accurate answers based on the provided web content.
 
@@ -89,10 +101,9 @@ Please provide a direct answer to the query based on the above content."""
         )
 
         if response.status_code != 200:
-            error_text = response.text
             raise HTTPException(
                 status_code=response.status_code,
-                detail=f"DeepSeek API error: {error_text}"
+                detail=f"DeepSeek API error: {response.text}"
             )
 
         result = response.json()
@@ -106,10 +117,9 @@ def format_context_for_llm(relevant_pages: List[dict], max_chars: int = 15000) -
 
     for i, page in enumerate(relevant_pages, 1):
         url = page.get("url", "Unknown URL")
-        content = page.get("content", page.get("text", ""))
+        content = page.get("content", page.get("text", page.get("markdown", "")))
         score = page.get("score", page.get("relevance_score", 0))
 
-        # Truncate individual page text if needed
         page_text = content[:3000] if len(content) > 3000 else content
 
         entry = f"""
@@ -132,9 +142,10 @@ Content:
 @app.on_event("startup")
 async def startup_event():
     """Initialize on startup."""
-    print("Initializing Crawl4AI Adaptive Crawler...")
-    print("Using Crawl4AI v0.7.8 with embedding strategy (all-MiniLM-L6-v2)")
-    print("Service ready!")
+    print("=" * 50)
+    print("Crawl4AI Adaptive Crawler Starting...")
+    print(f"Adaptive Crawling Available: {ADAPTIVE_AVAILABLE}")
+    print("=" * 50)
 
 
 @app.get("/")
@@ -143,11 +154,11 @@ async def root():
     return {
         "message": "Crawl4AI Adaptive Crawler is running!",
         "version": "1.0.0",
+        "adaptive_available": ADAPTIVE_AVAILABLE,
         "features": [
             "Crawl4AI v0.7.8 adaptive crawling",
             "Sentence-Transformers embeddings (all-MiniLM-L6-v2)",
-            "DeepSeek-reasoner for answer generation",
-            "Intelligent link prioritization"
+            "DeepSeek-reasoner for answer generation"
         ]
     }
 
@@ -155,23 +166,19 @@ async def root():
 @app.get("/health")
 async def health():
     """Health check endpoint."""
-    return {"status": "healthy"}
+    return {"status": "healthy", "adaptive_available": ADAPTIVE_AVAILABLE}
 
 
 @app.post("/crawl", response_model=CrawlResponse)
 async def adaptive_crawl(request: CrawlRequest):
-    """
-    Perform adaptive crawling and return a direct answer.
+    """Perform adaptive crawling and return a direct answer."""
 
-    The crawler will:
-    1. Start from the provided URL
-    2. Use Sentence-Transformers (all-MiniLM-L6-v2) embeddings to find relevant pages
-    3. Prioritize links based on relevance to the query
-    4. Stop when confidence threshold is reached or max_pages hit
-    5. Use DeepSeek-reasoner to generate a direct answer from the content
-    """
+    if not ADAPTIVE_AVAILABLE:
+        raise HTTPException(
+            status_code=500,
+            detail="AdaptiveCrawler not available. Check crawl4ai installation."
+        )
 
-    # Get DeepSeek API key from environment
     deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
     if not deepseek_api_key:
         raise HTTPException(
@@ -180,35 +187,27 @@ async def adaptive_crawl(request: CrawlRequest):
         )
 
     try:
-        # Configure adaptive crawling with embedding strategy
-        # Uses Sentence-Transformers all-MiniLM-L6-v2 by default
         config = AdaptiveConfig(
             confidence_threshold=request.confidence_threshold,
             max_pages=request.max_pages,
             top_k_links=request.top_k_links,
             min_gain_threshold=request.min_gain_threshold,
-            strategy="embedding",  # Use embedding-based strategy
+            strategy="embedding",
             embedding_model="sentence-transformers/all-MiniLM-L6-v2"
         )
 
         print(f"\nStarting adaptive crawl for: {request.query}")
         print(f"Starting URL: {request.start_url}")
-        print(f"Strategy: embedding (all-MiniLM-L6-v2)")
 
         async with AsyncWebCrawler() as crawler:
-            # Initialize adaptive crawler with config
             adaptive = AdaptiveCrawler(crawler, config)
 
-            # Start adaptive crawling
             result = await adaptive.digest(
                 start_url=request.start_url,
                 query=request.query
             )
 
-            # Print crawl statistics
             adaptive.print_stats()
-
-            # Get relevant content
             relevant_pages = adaptive.get_relevant_content(top_k=request.top_k_results)
 
             if not relevant_pages:
@@ -221,10 +220,8 @@ async def adaptive_crawl(request: CrawlRequest):
                     message="Crawling completed but no relevant pages found"
                 )
 
-            # Format context for DeepSeek
             context = format_context_for_llm(relevant_pages)
 
-            # Generate answer using DeepSeek
             print("\nGenerating answer with DeepSeek-reasoner...")
             answer = await call_deepseek(
                 query=request.query,
@@ -232,7 +229,6 @@ async def adaptive_crawl(request: CrawlRequest):
                 api_key=deepseek_api_key
             )
 
-            # Prepare sources
             sources = [
                 {
                     "url": page.get("url", ""),
@@ -241,7 +237,6 @@ async def adaptive_crawl(request: CrawlRequest):
                 for page in relevant_pages
             ]
 
-            # Get confidence from adaptive crawler
             confidence = getattr(adaptive, 'confidence', 0.0)
             pages_crawled = len(getattr(result, 'crawled_urls', [])) if hasattr(result, 'crawled_urls') else len(relevant_pages)
 
@@ -251,28 +246,16 @@ async def adaptive_crawl(request: CrawlRequest):
                 confidence=round(confidence, 3),
                 pages_crawled=pages_crawled,
                 sources=sources,
-                message=f"Successfully crawled and analyzed content, confidence: {confidence:.0%}"
+                message=f"Successfully crawled {pages_crawled} pages"
             )
 
     except HTTPException:
         raise
     except Exception as e:
         print(f"Error during crawl: {str(e)}")
+        import traceback
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.post("/crawl/simple")
-async def simple_crawl(start_url: str, query: str):
-    """
-    Simple crawl endpoint with minimal parameters.
-    Uses default settings for quick crawling.
-    """
-    request = CrawlRequest(
-        start_url=start_url,
-        query=query,
-        max_pages=10
-    )
-    return await adaptive_crawl(request)
 
 
 if __name__ == "__main__":
