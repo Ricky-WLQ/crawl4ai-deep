@@ -5,6 +5,7 @@ Uses Crawl4AI v0.7.8 adaptive crawling with embedding strategy.
 
 import os
 import sys
+from contextlib import asynccontextmanager
 from typing import Optional, List
 
 import httpx
@@ -14,24 +15,37 @@ from pydantic import BaseModel
 # Test imports at startup
 try:
     from crawl4ai import AsyncWebCrawler
-    print("AsyncWebCrawler imported successfully")
+    print("AsyncWebCrawler imported successfully", flush=True)
 except ImportError as e:
-    print(f"Failed to import AsyncWebCrawler: {e}")
+    print(f"Failed to import AsyncWebCrawler: {e}", flush=True)
     sys.exit(1)
 
 try:
     from crawl4ai import AdaptiveCrawler, AdaptiveConfig
     ADAPTIVE_AVAILABLE = True
-    print("AdaptiveCrawler and AdaptiveConfig imported successfully")
+    print("AdaptiveCrawler and AdaptiveConfig imported successfully", flush=True)
 except ImportError as e:
-    print(f"AdaptiveCrawler not available: {e}")
+    print(f"AdaptiveCrawler not available: {e}", flush=True)
     ADAPTIVE_AVAILABLE = False
 
-# Initialize FastAPI app
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Lifespan event handler."""
+    print("=" * 50, flush=True)
+    print("Crawl4AI Adaptive Crawler Starting...", flush=True)
+    print(f"Adaptive Crawling Available: {ADAPTIVE_AVAILABLE}", flush=True)
+    print("=" * 50, flush=True)
+    yield
+    print("Shutting down...", flush=True)
+
+
+# Initialize FastAPI app with lifespan
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
     description="Intelligent web crawler with DeepSeek reasoning and Sentence-Transformers embeddings",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 
@@ -139,34 +153,20 @@ Content:
     return "\n".join(context_parts)
 
 
-@app.on_event("startup")
-async def startup_event():
-    """Initialize on startup."""
-    print("=" * 50)
-    print("Crawl4AI Adaptive Crawler Starting...")
-    print(f"Adaptive Crawling Available: {ADAPTIVE_AVAILABLE}")
-    print("=" * 50)
-
-
 @app.get("/")
 async def root():
     """Service status endpoint."""
     return {
         "message": "Crawl4AI Adaptive Crawler is running!",
         "version": "1.0.0",
-        "adaptive_available": ADAPTIVE_AVAILABLE,
-        "features": [
-            "Crawl4AI v0.7.8 adaptive crawling",
-            "Sentence-Transformers embeddings (all-MiniLM-L6-v2)",
-            "DeepSeek-reasoner for answer generation"
-        ]
+        "adaptive_available": ADAPTIVE_AVAILABLE
     }
 
 
 @app.get("/health")
 async def health():
-    """Health check endpoint."""
-    return {"status": "healthy", "adaptive_available": ADAPTIVE_AVAILABLE}
+    """Health check endpoint - responds quickly."""
+    return {"status": "healthy"}
 
 
 @app.post("/crawl", response_model=CrawlResponse)
@@ -187,17 +187,29 @@ async def adaptive_crawl(request: CrawlRequest):
         )
 
     try:
-        config = AdaptiveConfig(
-            confidence_threshold=request.confidence_threshold,
-            max_pages=request.max_pages,
-            top_k_links=request.top_k_links,
-            min_gain_threshold=request.min_gain_threshold,
-            strategy="embedding",
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2"
-        )
+        # Use embedding strategy with sentence-transformers
+        # Falls back to statistical if embedding fails
+        try:
+            config = AdaptiveConfig(
+                confidence_threshold=request.confidence_threshold,
+                max_pages=request.max_pages,
+                top_k_links=request.top_k_links,
+                min_gain_threshold=request.min_gain_threshold,
+                strategy="embedding",
+                embedding_model="sentence-transformers/all-MiniLM-L6-v2"
+            )
+        except Exception as e:
+            print(f"Embedding strategy failed, using statistical: {e}", flush=True)
+            config = AdaptiveConfig(
+                confidence_threshold=request.confidence_threshold,
+                max_pages=request.max_pages,
+                top_k_links=request.top_k_links,
+                min_gain_threshold=request.min_gain_threshold,
+                strategy="statistical"
+            )
 
-        print(f"\nStarting adaptive crawl for: {request.query}")
-        print(f"Starting URL: {request.start_url}")
+        print(f"\nStarting adaptive crawl for: {request.query}", flush=True)
+        print(f"Starting URL: {request.start_url}", flush=True)
 
         async with AsyncWebCrawler() as crawler:
             adaptive = AdaptiveCrawler(crawler, config)
@@ -222,7 +234,7 @@ async def adaptive_crawl(request: CrawlRequest):
 
             context = format_context_for_llm(relevant_pages)
 
-            print("\nGenerating answer with DeepSeek-reasoner...")
+            print("\nGenerating answer with DeepSeek-reasoner...", flush=True)
             answer = await call_deepseek(
                 query=request.query,
                 context=context,
@@ -252,7 +264,7 @@ async def adaptive_crawl(request: CrawlRequest):
     except HTTPException:
         raise
     except Exception as e:
-        print(f"Error during crawl: {str(e)}")
+        print(f"Error during crawl: {str(e)}", flush=True)
         import traceback
         traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
@@ -261,5 +273,10 @@ async def adaptive_crawl(request: CrawlRequest):
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
-    print(f"Starting server on port {port}...")
-    uvicorn.run(app, host="0.0.0.0", port=port)
+    print(f"Starting server on port {port}...", flush=True)
+    uvicorn.run(
+        app,
+        host="0.0.0.0",
+        port=port,
+        log_level="info"
+    )
