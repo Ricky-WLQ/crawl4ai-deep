@@ -128,25 +128,40 @@ Based on the above content, provide a detailed and accurate answer to the query.
         return result["choices"][0]["message"]["content"]
 
 
-def compute_content_relevance(content: str, keywords: List[str]) -> float:
+def compute_content_relevance(content: str, keywords: List[str], url: str = "") -> float:
     """
-    Compute relevance score based on how many keywords appear in content.
+    Compute relevance score based on keyword density and URL matching.
     Returns a score between 0.0 and 1.0
     """
     if not content or not keywords:
         return 0.0
 
     content_lower = content.lower()
-    matches = sum(1 for kw in keywords if kw.lower() in content_lower)
+    url_lower = url.lower()
 
-    # Also count frequency for better scoring
+    # Count keyword matches
+    matches = sum(1 for kw in keywords if kw.lower() in content_lower)
     total_occurrences = sum(content_lower.count(kw.lower()) for kw in keywords)
 
-    # Score: combination of keyword coverage and frequency
-    coverage_score = matches / len(keywords) if keywords else 0
-    frequency_score = min(total_occurrences / 10, 1.0)  # Cap at 1.0
+    # Normalize by content length (density-based scoring)
+    content_length = len(content_lower)
+    density = (total_occurrences * 100) / content_length if content_length > 0 else 0
 
-    return (coverage_score * 0.6) + (frequency_score * 0.4)
+    # Coverage: what fraction of keywords appear
+    coverage_score = matches / len(keywords) if keywords else 0
+
+    # Density score: normalized keyword frequency (cap at reasonable density)
+    density_score = min(density / 2.0, 1.0)  # 2% density = max score
+
+    # URL bonus: if keywords appear in URL, it's likely more relevant
+    url_matches = sum(1 for kw in keywords if kw.lower() in url_lower)
+    url_bonus = (url_matches / len(keywords)) * 0.2 if keywords else 0
+
+    # Combined score
+    base_score = (coverage_score * 0.4) + (density_score * 0.4)
+    final_score = min(base_score + url_bonus, 1.0)
+
+    return round(final_score, 3)
 
 
 def rank_pages_by_relevance(results: List, keywords: List[str]) -> List:
@@ -157,6 +172,7 @@ def rank_pages_by_relevance(results: List, keywords: List[str]) -> List:
     scored_results = []
 
     for result in results:
+        url = result.url if hasattr(result, 'url') else ""
         content = ""
         if hasattr(result, 'markdown') and result.markdown:
             content = result.markdown
@@ -165,7 +181,7 @@ def rank_pages_by_relevance(results: List, keywords: List[str]) -> List:
         elif hasattr(result, 'html') and result.html:
             content = result.html
 
-        score = compute_content_relevance(content, keywords)
+        score = compute_content_relevance(content, keywords, url)
         scored_results.append((result, score))
 
     # Sort by score descending
@@ -275,17 +291,38 @@ async def deep_crawl(request: CrawlRequest):
         )
 
         # Extract keywords from query for scoring
-        # Simple keyword extraction: split query into words, filter short ones
+        # Filter common stop words and keep meaningful terms
+        stop_words = {
+            'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
+            'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
+            'be', 'have', 'has', 'had', 'do', 'does', 'did', 'will', 'would',
+            'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that',
+            'these', 'those', 'i', 'you', 'he', 'she', 'it', 'we', 'they',
+            'what', 'which', 'who', 'whom', 'how', 'when', 'where', 'why',
+            'all', 'each', 'every', 'both', 'few', 'more', 'most', 'some',
+            'any', 'no', 'not', 'only', 'same', 'so', 'than', 'too', 'very',
+            'just', 'also', 'now', 'here', 'there', 'then', 'if', 'about',
+            'show', 'get', 'find', 'give', 'me', 'my', 'your', 'our', 'want',
+            'need', 'please', 'help', 'using', 'use'
+        }
         keywords = [word.lower() for word in request.query.split()
-                   if len(word) > 2 and word.lower() not in
-                   {'the', 'and', 'for', 'how', 'what', 'where', 'when', 'why', 'show', 'get', 'find'}]
+                   if len(word) > 2 and word.lower() not in stop_words]
+
+        # Also extract multi-word phrases (bigrams) for better matching
+        words = request.query.lower().split()
+        for i in range(len(words) - 1):
+            phrase = f"{words[i]} {words[i+1]}"
+            # Add phrase if neither word is a stop word
+            if words[i] not in stop_words and words[i+1] not in stop_words:
+                keywords.append(phrase)
 
         print(f"Keywords for scoring: {keywords}", flush=True)
 
         # Create keyword scorer to prioritize relevant links
+        # Higher weight = stronger preference for URLs containing keywords
         url_scorer = KeywordRelevanceScorer(
             keywords=keywords,
-            weight=0.7
+            weight=0.9
         )
 
         # Create BestFirst crawl strategy (prioritizes relevant links)
