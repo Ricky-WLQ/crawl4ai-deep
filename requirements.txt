@@ -1,9 +1,9 @@
-# Core crawling - Crawl4AI v0.7.8 (light version - cloud APIs only)
-crawl4ai==0.7.8
+# Core crawling - Crawl4AI with AdaptiveCrawler support
+crawl4ai>=0.7.0
 
 # Web framework
 fastapi
 uvicorn[standard]
 
-# Async HTTP client for API calls
+# Async HTTP client for API calls (DeepSeek, OpenRouter)
 httpx
