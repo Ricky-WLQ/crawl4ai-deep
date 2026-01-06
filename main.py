@@ -1,15 +1,16 @@
 """
-Crawl4AI Adaptive Crawler with OpenRouter Embeddings + DeepSeek Reasoner
-- Uses AdaptiveCrawler for intelligent subpage discovery
-- OpenRouter API for semantic embeddings (text-embedding-3-small)
+Crawl4AI Adaptive Crawler with Custom OpenRouter Embeddings + DeepSeek Reasoner
+- Uses AdaptiveCrawler with BM25 for reliable crawling
+- Custom OpenRouter embedding API calls for semantic re-ranking
 - Automatically stops when sufficient information is gathered
 - DeepSeek-reasoner for answer generation
 """
 
 import os
 import sys
+import numpy as np
 from contextlib import asynccontextmanager
-from typing import Optional, List
+from typing import Optional, List, Tuple
 from urllib.parse import urlparse
 
 import httpx
@@ -26,7 +27,7 @@ except ImportError as e:
 
 # Adaptive crawler imports
 try:
-    from crawl4ai import AdaptiveCrawler, AdaptiveConfig, LLMConfig
+    from crawl4ai import AdaptiveCrawler, AdaptiveConfig
     ADAPTIVE_AVAILABLE = True
     print("AdaptiveCrawler imported successfully", flush=True)
 except ImportError as e:
@@ -45,6 +46,143 @@ except ImportError as e:
     DEEP_CRAWL_AVAILABLE = False
 
 
+# ============================================================================
+# Custom OpenRouter Embedding Client
+# ============================================================================
+
+class OpenRouterEmbeddings:
+    """Custom client for OpenRouter embeddings API."""
+
+    def __init__(self, api_key: str, model: str = "qwen/qwen3-embedding-8b"):
+        self.api_key = api_key
+        self.model = model
+        self.base_url = "https://openrouter.ai/api/v1/embeddings"
+
+    async def get_embeddings(self, texts: List[str]) -> List[List[float]]:
+        """Get embeddings for a list of texts from OpenRouter."""
+        if not texts:
+            return []
+
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.post(
+                self.base_url,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json"
+                },
+                json={
+                    "model": self.model,
+                    "input": texts
+                }
+            )
+
+            if response.status_code != 200:
+                print(f"OpenRouter embedding error: {response.status_code} - {response.text}", flush=True)
+                raise HTTPException(
+                    status_code=response.status_code,
+                    detail=f"OpenRouter embedding error: {response.text}"
+                )
+
+            result = response.json()
+            # Extract embeddings in order
+            embeddings = [None] * len(texts)
+            for item in result.get("data", []):
+                idx = item.get("index", 0)
+                embeddings[idx] = item.get("embedding", [])
+
+            return embeddings
+
+    async def get_embedding(self, text: str) -> List[float]:
+        """Get embedding for a single text."""
+        embeddings = await self.get_embeddings([text])
+        return embeddings[0] if embeddings else []
+
+
+def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
+    """Calculate cosine similarity between two vectors."""
+    if not vec1 or not vec2:
+        return 0.0
+
+    a = np.array(vec1)
+    b = np.array(vec2)
+
+    dot_product = np.dot(a, b)
+    norm_a = np.linalg.norm(a)
+    norm_b = np.linalg.norm(b)
+
+    if norm_a == 0 or norm_b == 0:
+        return 0.0
+
+    return float(dot_product / (norm_a * norm_b))
+
+
+async def rerank_by_embeddings(
+    query: str,
+    pages: List[dict],
+    embedding_client: OpenRouterEmbeddings,
+    top_k: int = 10
+) -> List[dict]:
+    """Re-rank pages by semantic similarity to query using embeddings."""
+
+    if not pages:
+        return []
+
+    print(f"Re-ranking {len(pages)} pages using OpenRouter embeddings...", flush=True)
+
+    # Get query embedding
+    query_embedding = await embedding_client.get_embedding(query)
+
+    if not query_embedding:
+        print("Failed to get query embedding, returning original order", flush=True)
+        return pages[:top_k]
+
+    # Get embeddings for page content (use first 1000 chars for efficiency)
+    page_texts = []
+    for page in pages:
+        content = page.get('content', '')
+        # Use title + first part of content for embedding
+        text = content[:1500] if content else ''
+        page_texts.append(text)
+
+    # Batch embed all pages
+    try:
+        page_embeddings = await embedding_client.get_embeddings(page_texts)
+    except Exception as e:
+        print(f"Failed to get page embeddings: {e}, returning original order", flush=True)
+        return pages[:top_k]
+
+    # Calculate similarity scores
+    scored_pages = []
+    for i, page in enumerate(pages):
+        if i < len(page_embeddings) and page_embeddings[i]:
+            similarity = cosine_similarity(query_embedding, page_embeddings[i])
+        else:
+            similarity = 0.0
+
+        # Combine with original BM25 score if available
+        original_score = page.get('score', 0.5)
+        # Weighted combination: 60% embedding, 40% BM25
+        combined_score = (0.6 * similarity) + (0.4 * original_score)
+
+        scored_pages.append({
+            **page,
+            'embedding_score': round(similarity, 4),
+            'original_score': original_score,
+            'score': round(combined_score, 4)
+        })
+
+    # Sort by combined score
+    scored_pages.sort(key=lambda x: x['score'], reverse=True)
+
+    print(f"Re-ranking complete. Top scores: {[p['score'] for p in scored_pages[:5]]}", flush=True)
+
+    return scored_pages[:top_k]
+
+
+# ============================================================================
+# FastAPI Application
+# ============================================================================
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Lifespan event handler."""
@@ -52,7 +190,8 @@ async def lifespan(app: FastAPI):
     print("Crawl4AI Adaptive Crawler Starting...", flush=True)
     print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
     print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
-    print("Embedding: OpenRouter (text-embedding-3-small)", flush=True)
+    print("Crawling: BM25 Statistical Strategy", flush=True)
+    print("Re-ranking: OpenRouter Embeddings (if API key provided)", flush=True)
     print("Answer Generation: DeepSeek-reasoner", flush=True)
     print("=" * 60, flush=True)
     yield
@@ -61,8 +200,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
-    description="Intelligent web crawler with semantic embeddings and DeepSeek reasoning",
-    version="2.0.0",
+    description="Intelligent web crawler with OpenRouter embeddings and DeepSeek reasoning",
+    version="2.2.0",
     lifespan=lifespan
 )
 
@@ -74,7 +213,7 @@ class CrawlRequest(BaseModel):
     max_pages: Optional[int] = 20
     confidence_threshold: Optional[float] = 0.7
     use_embeddings: Optional[bool] = True
-    embedding_model: Optional[str] = "openrouter/qwen/qwen3-embedding-8b"  # LiteLLM format: openrouter/<model>
+    embedding_model: Optional[str] = "qwen/qwen3-embedding-8b"
 
 
 class CrawlResponse(BaseModel):
@@ -85,6 +224,7 @@ class CrawlResponse(BaseModel):
     pages_crawled: int
     sources: List[dict]
     message: str
+    embedding_used: bool
 
 
 async def call_deepseek(
@@ -150,6 +290,7 @@ def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) 
     for i, page in enumerate(relevant_pages, 1):
         url = page.get('url', 'unknown')
         score = page.get('score', 0)
+        embedding_score = page.get('embedding_score', None)
         content = page.get('content', '')
 
         if not content or len(content) < 50:
@@ -158,8 +299,14 @@ def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) 
         # Truncate individual page content
         page_text = content[:5000] if len(content) > 5000 else content
 
+        # Show both scores if embedding was used
+        if embedding_score is not None:
+            score_info = f"Combined: {score:.0%}, Semantic: {embedding_score:.0%}"
+        else:
+            score_info = f"Relevance: {score:.0%}"
+
         entry = f"""
-=== Page {i} (Relevance: {score:.0%}): {url} ===
+=== Page {i} ({score_info}): {url} ===
 {page_text}
 
 """
@@ -175,16 +322,18 @@ def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) 
 @app.get("/")
 async def root():
     """Service status endpoint."""
+    openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     return {
         "message": "Crawl4AI Adaptive Crawler is running!",
-        "version": "2.0.0",
+        "version": "2.2.0",
         "adaptive_available": ADAPTIVE_AVAILABLE,
         "deep_crawl_fallback": DEEP_CRAWL_AVAILABLE,
+        "openrouter_embeddings": openrouter_configured,
         "features": [
-            "AdaptiveCrawler with semantic embeddings",
+            "AdaptiveCrawler with BM25 statistical scoring",
+            "Custom OpenRouter embeddings for semantic re-ranking",
             "Intelligent subpage discovery",
             "Automatic confidence-based stopping",
-            "OpenRouter embeddings (text-embedding-3-small)",
             "DeepSeek-reasoner for answer generation"
         ]
     }
@@ -201,9 +350,8 @@ async def adaptive_crawl(request: CrawlRequest):
     """
     Perform adaptive crawling and return a direct answer.
 
-    - Uses AdaptiveCrawler for intelligent link discovery
-    - Semantic embeddings score pages by content relevance (not just URL)
-    - Automatically stops when confident enough information is gathered
+    - Uses AdaptiveCrawler with BM25 for reliable crawling
+    - OpenRouter embeddings for semantic re-ranking (if API key provided)
     - DeepSeek-reasoner generates comprehensive answer
     """
 
@@ -216,8 +364,10 @@ async def adaptive_crawl(request: CrawlRequest):
         )
 
     openrouter_api_key = os.environ.get("OPENROUTER_API_KEY")
-    if not openrouter_api_key and request.use_embeddings:
-        print("Warning: OPENROUTER_API_KEY not set, falling back to statistical strategy", flush=True)
+    use_embeddings = request.use_embeddings and bool(openrouter_api_key)
+
+    if request.use_embeddings and not openrouter_api_key:
+        print("Warning: OPENROUTER_API_KEY not set, skipping embedding re-ranking", flush=True)
 
     try:
         # Extract domain from start URL
@@ -230,20 +380,31 @@ async def adaptive_crawl(request: CrawlRequest):
         print(f"Domain: {domain}", flush=True)
         print(f"Max pages: {request.max_pages}", flush=True)
         print(f"Confidence threshold: {request.confidence_threshold}", flush=True)
-        print(f"Use embeddings: {request.use_embeddings and bool(openrouter_api_key)}", flush=True)
+        print(f"Embedding re-ranking: {use_embeddings}", flush=True)
+        if use_embeddings:
+            print(f"Embedding model: {request.embedding_model}", flush=True)
         print(f"{'='*60}", flush=True)
+
+        # Create embedding client if available
+        embedding_client = None
+        if use_embeddings:
+            embedding_client = OpenRouterEmbeddings(
+                api_key=openrouter_api_key,
+                model=request.embedding_model
+            )
 
         if ADAPTIVE_AVAILABLE:
             return await run_adaptive_crawl(
                 request=request,
                 deepseek_api_key=deepseek_api_key,
-                openrouter_api_key=openrouter_api_key,
+                embedding_client=embedding_client,
                 domain=domain
             )
         elif DEEP_CRAWL_AVAILABLE:
             return await run_fallback_deep_crawl(
                 request=request,
                 deepseek_api_key=deepseek_api_key,
+                embedding_client=embedding_client,
                 domain=domain
             )
         else:
@@ -264,39 +425,20 @@ async def adaptive_crawl(request: CrawlRequest):
 async def run_adaptive_crawl(
     request: CrawlRequest,
     deepseek_api_key: str,
-    openrouter_api_key: Optional[str],
+    embedding_client: Optional[OpenRouterEmbeddings],
     domain: str
 ) -> CrawlResponse:
-    """Run crawl using AdaptiveCrawler with optional embeddings."""
+    """Run crawl using AdaptiveCrawler with BM25, then re-rank with embeddings."""
 
-    # Configure adaptive strategy
-    use_embedding_strategy = request.use_embeddings and openrouter_api_key
-
-    if use_embedding_strategy:
-        # Use embedding strategy with OpenRouter
-        # LiteLLM format: openrouter/<model> - no base_url needed
-        print(f"Using EMBEDDING strategy ({request.embedding_model})", flush=True)
-        config = AdaptiveConfig(
-            strategy="embedding",
-            embedding_llm_config=LLMConfig(
-                provider=request.embedding_model,
-                api_token=openrouter_api_key
-            ),
-            confidence_threshold=request.confidence_threshold,
-            max_pages=request.max_pages,
-            top_k_links=5,
-            min_gain_threshold=0.05
-        )
-    else:
-        # Use statistical strategy (BM25) - no embeddings
-        print("Using STATISTICAL (BM25) strategy", flush=True)
-        config = AdaptiveConfig(
-            strategy="statistical",
-            confidence_threshold=request.confidence_threshold,
-            max_pages=request.max_pages,
-            top_k_links=5,
-            min_gain_threshold=0.05
-        )
+    # Use statistical strategy (BM25) for reliable crawling
+    print("Using BM25 STATISTICAL strategy for crawling", flush=True)
+    config = AdaptiveConfig(
+        strategy="statistical",
+        confidence_threshold=request.confidence_threshold,
+        max_pages=request.max_pages,
+        top_k_links=5,
+        min_gain_threshold=0.05
+    )
 
     browser_config = BrowserConfig(
         headless=True,
@@ -329,15 +471,38 @@ async def run_adaptive_crawl(
                 confidence=0.0,
                 pages_crawled=0,
                 sources=[],
-                message="Crawling failed - no pages found"
+                message="Crawling failed - no pages found",
+                embedding_used=False
             )
 
-        # Get most relevant content
-        relevant_pages = adaptive.get_relevant_content(top_k=10)
+        # Get relevant content from BM25
+        relevant_pages = adaptive.get_relevant_content(top_k=20)  # Get more for re-ranking
 
-        print(f"\nTop relevant pages:", flush=True)
+        print(f"\nBM25 top pages:", flush=True)
         for i, page in enumerate(relevant_pages[:5], 1):
             print(f"  {i}. {page['score']:.0%} - {page['url']}", flush=True)
+
+        # Re-rank with embeddings if available
+        embedding_used = False
+        if embedding_client and relevant_pages:
+            try:
+                relevant_pages = await rerank_by_embeddings(
+                    query=request.query,
+                    pages=relevant_pages,
+                    embedding_client=embedding_client,
+                    top_k=10
+                )
+                embedding_used = True
+
+                print(f"\nAfter embedding re-ranking:", flush=True)
+                for i, page in enumerate(relevant_pages[:5], 1):
+                    emb_score = page.get('embedding_score', 0)
+                    print(f"  {i}. Combined: {page['score']:.0%} (Semantic: {emb_score:.0%}) - {page['url']}", flush=True)
+            except Exception as e:
+                print(f"Embedding re-ranking failed: {e}, using BM25 results", flush=True)
+                relevant_pages = relevant_pages[:10]
+        else:
+            relevant_pages = relevant_pages[:10]
 
         # Format context for DeepSeek
         context = format_adaptive_context(relevant_pages)
@@ -349,7 +514,8 @@ async def run_adaptive_crawl(
                 confidence=confidence,
                 pages_crawled=pages_crawled,
                 sources=[],
-                message="No content extracted"
+                message="No content extracted",
+                embedding_used=embedding_used
             )
 
         print(f"\nContext length: {len(context)} chars", flush=True)
@@ -364,10 +530,13 @@ async def run_adaptive_crawl(
         # Prepare sources
         sources = []
         for page in relevant_pages[:10]:
-            sources.append({
+            source_info = {
                 "url": page.get('url', 'unknown'),
                 "relevance": round(page.get('score', 0), 3)
-            })
+            }
+            if embedding_used and 'embedding_score' in page:
+                source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)
+            sources.append(source_info)
 
         return CrawlResponse(
             success=True,
@@ -375,13 +544,16 @@ async def run_adaptive_crawl(
             confidence=round(confidence, 3),
             pages_crawled=pages_crawled,
             sources=sources,
-            message=f"Adaptive crawl complete: {pages_crawled} pages, {confidence:.0%} confidence"
+            message=f"Adaptive crawl complete: {pages_crawled} pages, {confidence:.0%} confidence" +
+                    (" (with semantic re-ranking)" if embedding_used else ""),
+            embedding_used=embedding_used
         )
 
 
 async def run_fallback_deep_crawl(
     request: CrawlRequest,
     deepseek_api_key: str,
+    embedding_client: Optional[OpenRouterEmbeddings],
     domain: str
 ) -> CrawlResponse:
     """Fallback to deep crawling if AdaptiveCrawler is not available."""
@@ -461,15 +633,13 @@ async def run_fallback_deep_crawl(
                 confidence=0.0,
                 pages_crawled=0,
                 sources=[],
-                message="Crawling failed - no pages found"
+                message="Crawling failed - no pages found",
+                embedding_used=False
             )
 
-        # Format context (simple approach for fallback)
-        context_parts = []
-        total_chars = 0
-        max_chars = 25000
-
-        for i, result in enumerate(successful_pages[:10], 1):
+        # Convert to standard format for re-ranking
+        pages_for_ranking = []
+        for result in successful_pages:
             url = result.url if hasattr(result, 'url') else str(result)
             content = ""
             if hasattr(result, 'markdown') and result.markdown:
@@ -477,19 +647,32 @@ async def run_fallback_deep_crawl(
             elif hasattr(result, 'text') and result.text:
                 content = result.text
 
-            if not content or len(content) < 50:
-                continue
+            if content and len(content) >= 50:
+                pages_for_ranking.append({
+                    'url': url,
+                    'content': content,
+                    'score': 0.5
+                })
 
-            page_text = content[:5000] if len(content) > 5000 else content
-            entry = f"\n=== Page {i}: {url} ===\n{page_text}\n"
+        # Re-rank with embeddings if available
+        embedding_used = False
+        if embedding_client and pages_for_ranking:
+            try:
+                pages_for_ranking = await rerank_by_embeddings(
+                    query=request.query,
+                    pages=pages_for_ranking,
+                    embedding_client=embedding_client,
+                    top_k=10
+                )
+                embedding_used = True
+            except Exception as e:
+                print(f"Embedding re-ranking failed: {e}", flush=True)
+                pages_for_ranking = pages_for_ranking[:10]
+        else:
+            pages_for_ranking = pages_for_ranking[:10]
 
-            if total_chars + len(entry) > max_chars:
-                break
-
-            context_parts.append(entry)
-            total_chars += len(entry)
-
-        context = "\n".join(context_parts)
+        # Format context
+        context = format_adaptive_context(pages_for_ranking)
 
         if not context.strip():
             return CrawlResponse(
@@ -498,7 +681,8 @@ async def run_fallback_deep_crawl(
                 confidence=0.0,
                 pages_crawled=pages_crawled,
                 sources=[],
-                message="No content extracted"
+                message="No content extracted",
+                embedding_used=embedding_used
             )
 
         print(f"Context length: {len(context)} chars", flush=True)
@@ -512,17 +696,24 @@ async def run_fallback_deep_crawl(
 
         # Prepare sources
         sources = []
-        for result in successful_pages[:10]:
-            url = result.url if hasattr(result, 'url') else str(result)
-            sources.append({"url": url, "relevance": 0.5})
+        for page in pages_for_ranking[:10]:
+            source_info = {
+                "url": page.get('url', 'unknown'),
+                "relevance": round(page.get('score', 0), 3)
+            }
+            if embedding_used and 'embedding_score' in page:
+                source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)
+            sources.append(source_info)
 
         return CrawlResponse(
             success=True,
             answer=answer,
-            confidence=0.5,  # No confidence score in fallback mode
+            confidence=0.5,
             pages_crawled=pages_crawled,
             sources=sources,
-            message=f"Deep crawl complete: {pages_crawled} pages (fallback mode)"
+            message=f"Deep crawl complete: {pages_crawled} pages (fallback mode)" +
+                    (" (with semantic re-ranking)" if embedding_used else ""),
+            embedding_used=embedding_used
         )
 
 
