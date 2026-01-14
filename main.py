@@ -1,12 +1,22 @@
 """
-Crawl4AI Adaptive Crawler with Dual Embedding Strategy + DeepSeek Reasoner
-- Uses AdaptiveCrawler with EMBEDDING strategy for semantic link selection
-- OpenAI text-embedding-3-small for crawling phase (semantic link selection)
-- OpenRouter embeddings (qwen3-embedding-8b) for re-ranking phase
-- Automatically stops when sufficient information is gathered
-- DeepSeek-reasoner for answer generation
+Crawl4AI Adaptive Crawler with EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
 
-Version: 3.2.0
+EMBEDDING STRATEGY (Semantic Crawling):
+- Uses LOCAL sentence-transformers for embedding calculations (no API needed)
+- Uses OpenAI GPT-4o-mini for query expansion (generates query variations)
+- Semantic link selection understands meaning, not just keywords
+- Works with Chinese and multilingual queries
+
+FALLBACK (if OPENAI_API_KEY not set):
+- Uses BM25 statistical strategy (keyword-based)
+
+RE-RANKING (optional):
+- OpenRouter embeddings (qwen3-embedding-8b) for semantic re-ranking
+
+ANSWER GENERATION:
+- DeepSeek-reasoner for comprehensive answers
+
+Version: 3.4.0
 """
 
 import os
@@ -202,15 +212,22 @@ async def lifespan(app: FastAPI):
     openai_configured = bool(os.environ.get("OPENAI_API_KEY"))
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     print("=" * 60, flush=True)
-    print("Crawl4AI Adaptive Crawler v3.2.0 Starting...", flush=True)
+    print("Crawl4AI Adaptive Crawler v3.4.0 Starting...", flush=True)
     print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
     print(f"LLMConfig Available: {LLMCONFIG_AVAILABLE}", flush=True)
     print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
-    print(f"OpenAI API Key: {'Configured' if openai_configured else 'NOT SET'}", flush=True)
+    print(f"OpenAI API Key: {'Configured' if openai_configured else 'NOT SET (will use BM25)'}", flush=True)
     print(f"OpenRouter API Key: {'Configured' if openrouter_configured else 'NOT SET'}", flush=True)
-    print("Crawling: OpenAI text-embedding-3-small (if key set)", flush=True)
-    print("Re-ranking: OpenRouter qwen3-embedding-8b (if key set)", flush=True)
-    print("Answer Generation: DeepSeek-reasoner", flush=True)
+    print("=" * 60, flush=True)
+    if openai_configured:
+        print("EMBEDDING Strategy Enabled:", flush=True)
+        print("  - Embeddings: LOCAL sentence-transformers (all-MiniLM-L6-v2)", flush=True)
+        print("  - Query Expansion: OpenAI GPT-4o-mini", flush=True)
+    else:
+        print("STATISTICAL Strategy (BM25) - Set OPENAI_API_KEY for semantic crawling", flush=True)
+    if openrouter_configured:
+        print("  - Re-ranking: OpenRouter qwen3-embedding-8b", flush=True)
+    print("  - Answer Generation: DeepSeek-reasoner", flush=True)
     print("=" * 60, flush=True)
     yield
     print("Shutting down...", flush=True)
@@ -218,8 +235,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
-    description="Intelligent web crawler with dual embedding strategy (OpenAI for crawling, OpenRouter for re-ranking) and DeepSeek reasoning",
-    version="3.2.0",
+    description="Intelligent web crawler with EMBEDDING strategy (local embeddings + GPT query expansion) + OpenRouter re-ranking + DeepSeek reasoning",
+    version="3.4.0",
     lifespan=lifespan
 )
 
@@ -455,26 +472,39 @@ async def run_adaptive_crawl(
 ) -> CrawlResponse:
     """Run crawl using AdaptiveCrawler with EMBEDDING strategy + OpenRouter re-ranking.
 
-    - Crawling: OpenAI text-embedding-3-small for semantic link selection
-    - Re-ranking: OpenRouter qwen3-embedding-8b (if API key provided)
+    EMBEDDING STRATEGY (when OPENAI_API_KEY is set):
+    - Embeddings: LOCAL sentence-transformers/all-MiniLM-L6-v2 (no API cost)
+    - Query Expansion: OpenAI GPT-4o-mini (generates query variations)
+
+    FALLBACK (when OPENAI_API_KEY not set):
+    - BM25 statistical strategy (keyword-based)
+
+    Re-ranking: OpenRouter qwen3-embedding-8b (if OPENROUTER_API_KEY set)
     """
 
-    # Check if OpenAI API key is available for native embedding strategy
+    # Check if OpenAI API key is available for embedding strategy
     openai_api_key = os.environ.get("OPENAI_API_KEY")
 
     if LLMCONFIG_AVAILABLE and openai_api_key and request.use_embeddings:
-        # Use native EMBEDDING strategy with OpenAI
+        # Use EMBEDDING strategy with:
+        # - LOCAL sentence-transformers for embeddings (no API cost)
+        # - OpenAI GPT-4o-mini for query expansion (CHAT model, not embedding model!)
         print("Using EMBEDDING strategy for semantic link selection", flush=True)
-        print("Crawling model: OpenAI text-embedding-3-small", flush=True)
+        print("  Embeddings: LOCAL sentence-transformers/all-MiniLM-L6-v2", flush=True)
+        print("  Query Expansion: OpenAI GPT-4o-mini", flush=True)
 
-        embedding_llm_config = LLMConfig(
-            provider="openai/text-embedding-3-small",
+        # LLMConfig is for query expansion - must use a CHAT model, not embedding model!
+        query_expansion_config = LLMConfig(
+            provider="openai/gpt-4o-mini",  # Chat model for query expansion
             api_token=openai_api_key
         )
 
         config = AdaptiveConfig(
             strategy="embedding",
-            embedding_llm_config=embedding_llm_config,
+            # Use LOCAL sentence-transformers for embedding calculations (free!)
+            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            # Use OpenAI chat model for query expansion (generates variations)
+            embedding_llm_config=query_expansion_config,
             confidence_threshold=request.confidence_threshold,
             max_pages=request.max_pages,
             top_k_links=15,  # Increased from 5 to explore more links
@@ -485,6 +515,7 @@ async def run_adaptive_crawl(
     else:
         # Fallback to statistical strategy if OpenAI key not available
         print("Using STATISTICAL (BM25) strategy (OPENAI_API_KEY not set)", flush=True)
+        print("  Set OPENAI_API_KEY for semantic crawling", flush=True)
         config = AdaptiveConfig(
             strategy="statistical",
             confidence_threshold=request.confidence_threshold,
