@@ -1,11 +1,11 @@
 """
-Crawl4AI Adaptive Crawler with LOCAL EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
+Crawl4AI Adaptive Crawler with LOCAL MULTILINGUAL EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
 
 EMBEDDING STRATEGY (Semantic Crawling - NO API NEEDED!):
-- Uses LOCAL sentence-transformers/all-MiniLM-L6-v2 for embeddings
-- Runs entirely on the server - no external API calls for crawling
+- Uses LOCAL sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2
+- Supports 50+ languages including Chinese, English, and more
+- Optimized stopping criteria to prevent early termination
 - Semantic link selection understands meaning, not just keywords
-- Works with Chinese and multilingual queries
 
 FALLBACK (if use_embeddings=false):
 - Uses BM25 statistical strategy (keyword-based)
@@ -16,7 +16,7 @@ RE-RANKING (optional, requires OPENROUTER_API_KEY):
 ANSWER GENERATION (requires DEEPSEEK_API_KEY):
 - DeepSeek-reasoner for comprehensive answers
 
-Version: 3.5.0
+Version: 3.5.1
 """
 
 import os
@@ -211,13 +211,14 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler."""
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     print("=" * 60, flush=True)
-    print("Crawl4AI Adaptive Crawler v3.5.0 Starting...", flush=True)
+    print("Crawl4AI Adaptive Crawler v3.5.1 Starting...", flush=True)
     print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
     print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
     print(f"OpenRouter API Key: {'Configured' if openrouter_configured else 'NOT SET'}", flush=True)
     print("=" * 60, flush=True)
-    print("EMBEDDING Strategy (LOCAL - No API needed for crawling!):", flush=True)
-    print("  - Embeddings: sentence-transformers/all-MiniLM-L6-v2", flush=True)
+    print("EMBEDDING Strategy (LOCAL MULTILINGUAL - No API needed!):", flush=True)
+    print("  - Model: paraphrase-multilingual-MiniLM-L12-v2 (50+ languages)", flush=True)
+    print("  - Optimized stopping criteria for thorough crawling", flush=True)
     if openrouter_configured:
         print("  - Re-ranking: OpenRouter qwen3-embedding-8b", flush=True)
     print("  - Answer Generation: DeepSeek-reasoner", flush=True)
@@ -228,8 +229,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
-    description="Intelligent web crawler with LOCAL EMBEDDING strategy (sentence-transformers) + OpenRouter re-ranking + DeepSeek reasoning",
-    version="3.5.0",
+    description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + OpenRouter re-ranking + DeepSeek reasoning",
+    version="3.5.1",
     lifespan=lifespan
 )
 
@@ -350,22 +351,19 @@ def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) 
 @app.get("/")
 async def root():
     """Service status endpoint."""
-    openai_configured = bool(os.environ.get("OPENAI_API_KEY"))
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     return {
         "message": "Crawl4AI Adaptive Crawler is running!",
-        "version": "3.2.0",
+        "version": "3.5.1",
         "adaptive_available": ADAPTIVE_AVAILABLE,
-        "llmconfig_available": LLMCONFIG_AVAILABLE,
         "deep_crawl_fallback": DEEP_CRAWL_AVAILABLE,
-        "openai_crawling": openai_configured,
         "openrouter_reranking": openrouter_configured,
         "features": [
-            "DUAL embedding strategy for best results",
-            "OpenAI text-embedding-3-small for semantic crawling",
-            "OpenRouter qwen3-embedding-8b for re-ranking",
+            "LOCAL multilingual embedding strategy (no API needed for crawling)",
+            "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2 (50+ languages)",
+            "OpenRouter qwen3-embedding-8b for re-ranking (optional)",
+            "Optimized stopping criteria to prevent early termination",
             "Increased link exploration (top_k=15)",
-            "Automatic confidence-based stopping",
             "DeepSeek-reasoner for answer generation"
         ]
     }
@@ -479,18 +477,22 @@ async def run_adaptive_crawl(
         # Use EMBEDDING strategy with LOCAL sentence-transformers
         # No API key needed for embeddings - runs locally on server!
         print("Using EMBEDDING strategy for semantic link selection", flush=True)
-        print("  Embeddings: LOCAL sentence-transformers/all-MiniLM-L6-v2", flush=True)
+        print("  Embeddings: LOCAL sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2", flush=True)
 
         config = AdaptiveConfig(
             strategy="embedding",
-            # Use LOCAL sentence-transformers for embedding calculations (free!)
-            embedding_model="sentence-transformers/all-MiniLM-L6-v2",
+            # Use MULTILINGUAL model for Chinese/English support (50+ languages)
+            embedding_model="sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2",
             # DO NOT set embedding_llm_config - it overrides local model!
             confidence_threshold=request.confidence_threshold,
             max_pages=request.max_pages,
             top_k_links=15,  # Increased from 5 to explore more links
             min_gain_threshold=0.01,  # Lowered to avoid early stopping
-            n_query_variations=5  # Query variations (uses defaults)
+            n_query_variations=5,  # Query variations
+            # CRITICAL: Lower stopping thresholds to prevent early stopping
+            embedding_min_relative_improvement=0.01,  # Default 0.1 was too high
+            embedding_validation_min_score=0.05,      # Default 0.3 was too high
+            embedding_min_confidence_threshold=0.01,  # Default 0.1 was too high
         )
         used_embedding_crawl = True
     else:
