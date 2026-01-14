@@ -8,10 +8,6 @@ ENV PYTHONUNBUFFERED=1
 ENV CRAWL4AI_HEADLESS=true
 ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
 
-# sentence-transformers model cache location
-ENV SENTENCE_TRANSFORMERS_HOME=/app/models
-ENV HF_HOME=/app/models
-
 # Install system dependencies for Playwright/Chromium
 RUN apt-get update && apt-get install -y --no-install-recommends \
     wget \
@@ -48,10 +44,6 @@ RUN pip install --no-cache-dir -r requirements.txt
 
 # Run crawl4ai setup to install browsers
 RUN crawl4ai-setup
-
-# Pre-download the sentence-transformers model during build
-# This avoids first-run delay and ensures the model is available
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('paraphrase-multilingual-MiniLM-L12-v2')"
 
 # Copy application code
 COPY . .
