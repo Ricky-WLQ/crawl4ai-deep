@@ -10,7 +10,3 @@ httpx
 
 # For cosine similarity calculations (embeddings)
 numpy
-
-# Local embedding model for native embedding strategy during crawling
-# Uses paraphrase-multilingual-MiniLM-L12-v2 for Chinese/multilingual support
-sentence-transformers
