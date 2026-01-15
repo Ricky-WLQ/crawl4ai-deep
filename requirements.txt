@@ -1,390 +1,74 @@
 # ============================================================
-# Crawl4AI Adaptive Crawler v3.7.0 - Requirements
+# Crawl4AI Hybrid BFS Crawler v3.8.0 - Requirements
 # ============================================================
-# v3.7.0 SPA FIX (Context7 Verified):
-#   FIX 1: SPAFriendlyCrawler wrapper for JavaScript sites
-#   FIX 2: Embedding model verification at startup
-#   FIX 3: Verbose logging for debugging
+# v3.8.0 HYBRID BFS DEEP CRAWL (Context7 Verified):
+#   - BFSDeepCrawlStrategy for guaranteed depth crawling
+#   - max_depth=3 ensures reaching all content pages
+#   - Local semantic ranking with multilingual embeddings
+#   - Optional OpenRouter re-ranking
+#   - DeepSeek answer generation
 #
-# Previous Solutions:
-#   SOLUTION 1: Aggressive stopping prevention
-#   SOLUTION 2: Better multilingual embedding model (mpnet)
-#   SOLUTION 3: Better re-ranking weights
-#   SOLUTION 4: More query variations
-#   SOLUTION 5: Deeper crawling
-#   SOLUTION 6: Proper content extraction
+# WHY BFS OVER DFS:
+#   - BFS explores ALL links at each level before going deeper
+#   - Guarantees finding sibling pages (all law docs at same level)
+#   - DFS goes deep on first link, may miss siblings
 # ============================================================
 
 # ============================================================
 # CORE: Web Crawling Framework
 # ============================================================
-# AdaptiveCrawler with semantic link selection
-# Supports embedding strategy for intelligent crawling
 crawl4ai>=0.7.0
 
-# Playwright for browser automation
-# Required for JavaScript rendering and .asp file parsing
-# Note: Only Chromium browser installed (saves ~400MB vs all 3)
+# Playwright for browser automation (JavaScript rendering)
 playwright>=1.40.0
 
 # ============================================================
-# SOLUTION 2: LOCAL Multilingual Embedding Models
+# LOCAL Multilingual Embedding Models
 # ============================================================
-# SOLUTION 2: Upgraded from MiniLM to mpnet-base-v2
 # Model: paraphrase-multilingual-mpnet-base-v2
-# - Better semantic understanding for legal documents
 # - Supports 50+ languages (Chinese, English, Portuguese, etc.)
-# - Runs locally on server (NO API CALLS during crawling)
-# - Size: ~500MB (pre-downloaded in Docker)
+# - Runs locally (NO API calls during crawling)
 sentence-transformers>=2.2.0
 
-# Deep learning framework for embeddings (CPU-only version)
-# FIX: Updated from torch>=2.0.0,<2.1.0 to torch>=2.1.0
-# PyTorch 2.1+ required by sentence-transformers (torch.compiler attribute)
-# CPU version suitable for servers (GPU optional for acceleration)
+# Deep learning framework (CPU version)
 torch>=2.1.0,<3.0.0
 
-# Transformers for sentence-transformers models
+# Transformers for model loading
 transformers>=4.30.0,<5.0.0
 
 # ============================================================
 # WEB FRAMEWORK & ASYNC
 # ============================================================
-# FastAPI for REST API
 fastapi>=0.104.1
-
-# ASGI server for production (with standard extras)
 uvicorn[standard]>=0.24.0
 
-# ============================================================
-# SOLUTION 3: Async HTTP client for API calls (DeepSeek, OpenRouter)
-# ============================================================
-# FIX: Updated from httpx<0.26.0 to httpx>=0.27.2
-# crawl4ai requires httpx>=0.27.2, this resolves dependency conflict
-# Used for:
-#   - DeepSeek API (answer generation)
-#   - OpenRouter API (SOLUTION 3: re-ranking with embeddings)
-# Features: Retry logic, connection pooling, async support
+# Async HTTP client for API calls
 httpx>=0.27.2
 
 # ============================================================
-# SOLUTION 3: OpenRouter Re-ranking Dependencies
+# NUMERICAL & ML
 # ============================================================
-# For cosine similarity calculations in re-ranking
-# SOLUTION 3: 75% semantic + 25% BM25 weighting
-# FIX: Pin to <2.0 to avoid NumPy v2.0 breaking changes
 numpy>=1.24.3,<2.0.0
-
-# FIX v3.7.0: scikit-learn for embedding model verification
-# Used for cosine_similarity in startup verification
-# Also useful for future ML-based enhancements
 scikit-learn>=1.3.0
 
 # ============================================================
-# DATA VALIDATION & SERIALIZATION
+# DATA VALIDATION
 # ============================================================
-# Pydantic for request/response validation
-# FastAPI v2 requires Pydantic v2
 pydantic>=2.5.0
 
 # ============================================================
-# REQUIRED: Environment variable management
+# ENVIRONMENT
 # ============================================================
-# Loads variables from .env file during development
 python-dotenv>=1.0.0
 
 # ============================================================
-# OPTIONAL: Performance & Monitoring (Recommended)
+# INSTALLATION
 # ============================================================
-# Faster JSON serialization (optional, improves performance)
-# Speeds up response serialization by 2-3x
-# orjson>=3.9.0
-
-# Faster event loop for async operations (optional)
-# Improves throughput by ~10-30% on Unix systems
-# Only works on Unix (Linux, macOS); skip on Windows
-# uvloop>=0.19.0
-
-# Production WSGI server (optional, if not using Uvicorn)
-# Use instead of: python main.py
-# Run with: gunicorn -w 4 -b 0.0.0.0:8080 main:app
-# gunicorn>=21.0.0
-
-# ============================================================
-# ASYNC FILE OPERATIONS (Optional)
-# ============================================================
-# NOTE: aiofiles is NOT currently used in main.py
-# Keep for future async file operations if needed
-# Uncomment if adding async file read/write operations
-# aiofiles>=23.2.0
-
-# ============================================================
-# DEVELOPMENT DEPENDENCIES (Optional - Uncomment as needed)
-# ============================================================
-# Testing framework
-# pytest>=7.4.0
-
-# Async testing support
-# pytest-asyncio>=0.21.0
-
-# Code formatter
-# black>=23.0.0
-
-# Linter
-# flake8>=6.0.0
-
-# Type checker
-# mypy>=1.7.0
-
-# ============================================================
-# VERSION NOTES & JUSTIFICATION
-# ============================================================
+# Local:
+#   pip install -r requirements.txt
+#   python main.py
 #
-# Python Version: 3.11+ (specified in Dockerfile)
-#   - All packages support Python 3.11
-#   - FastAPI and Pydantic v2 are 3.11 optimized
-#
-# crawl4ai>=0.7.0
-#   - Supports AdaptiveCrawler with embedding strategy
-#   - SOLUTION 5: Deeper crawling capabilities
-#   - Better .asp file handling (SOLUTION 6)
-#   - Requires httpx>=0.27.2 (dependency management)
-#
-# playwright>=1.40.0
-#   - Stable release for Chromium automation
-#   - Only Chromium installed (~200MB)
-#   - Saves ~400MB vs Firefox+WebKit (not needed)
-#
-# torch>=2.1.0,<3.0.0
-#   - FIX: UPDATED from torch>=2.0.0,<2.1.0
-#   - Required for sentence-transformers (needs torch.compiler)
-#   - PyTorch 2.1 introduces torch.compiler optimization feature
-#   - CPU-only version (sufficient for inference)
-#   - GPU version available: pip install torch --index-url https://download.pytorch.org/whl/cu118
-#
-# transformers>=4.30.0,<5.0.0
-#   - Hugging Face transformers library
-#   - Required for language model inference
-#   - Pinned to <5.0.0 to avoid major version breaking changes
-#
-# sentence-transformers>=2.2.0
-#   - SOLUTION 2: Updated embedding library
-#   - Supports paraphrase-multilingual-mpnet-base-v2
-#   - Better Chinese language support
-#   - Requires torch>=2.1.0 (torch.compiler attribute)
-#
-# fastapi>=0.104.1
-#   - Modern async Python web framework
-#   - Automatic API documentation (/docs, /redoc)
-#   - No upper bound (auto-updates patch versions)
-#
-# uvicorn[standard]>=0.24.0
-#   - ASGI application server
-#   - Production-ready with standard extras (uvloop, httptools)
-#   - No upper bound (stable releases)
-#
-# httpx>=0.27.2
-#   - FIX: UPDATED from httpx>=0.25.1,<0.26.0
-#   - Modern async HTTP client
-#   - Replaces requests for async operations
-#   - Used for DeepSeek & OpenRouter API calls
-#   - Built-in retry logic (we implemented exponential backoff)
-#   - Matches crawl4ai requirement (>=0.27.2)
-#
-# pydantic>=2.5.0
-#   - Data validation and serialization
-#   - Request/response schemas
-#   - FastAPI v2 requires Pydantic v2
-#   - No upper bound (v2.x compatible)
-#
-# numpy>=1.24.3,<2.0.0
-#   - Numerical computing for cosine similarity
-#   - SOLUTION 3: Re-ranking calculations
-#   - FIX: Pinned to <2.0.0 (NumPy v2.0 has breaking changes)
-#
-# python-dotenv>=1.0.0
-#   - Environment variable management
-#   - Loads .env file during development
-#   - No upper bound (stable releases)
-#
-# ============================================================
-# INSTALLATION INSTRUCTIONS
-# ============================================================
-#
-# Local Development:
-#   1. Create virtual environment:
-#      python -m venv venv
-#      source venv/bin/activate  # On Windows: venv\Scripts\activate
-#
-#   2. Install requirements:
-#      pip install -r requirements.txt
-#
-#   3. Copy .env.example to .env and fill in API keys:
-#      cp .env.example .env
-#      # Edit .env with your keys
-#
-#   4. Run the application:
-#      python main.py
-#      # Access at http://localhost:8080/docs
-#
-# Docker Build:
-#   docker build -t crawl4ai-fixed:v3.7.0 .
-#
-# Docker Run:
-#   docker run --env-file .env -p 8080:8080 crawl4ai-fixed:v3.7.0
-#
-# ============================================================
-# DISK SPACE REQUIREMENTS
-# ============================================================
-#
-# Component Breakdown:
-#   - Base Python + system libs: ~500MB
-#   - Python packages: ~2.0GB
-#   - Playwright (Chromium only): ~200MB
-#   - Sentence-transformers model: ~500MB
-#   - Torch (CPU): ~800MB (slightly larger with 2.1+)
-#   - Transformers: ~300MB
-#   - Other dependencies: ~200MB
-#   ─────────────────────────────
-#   Total: ~4.5GB
-#
-# Previous Version: ~5.9GB
-# Size Reduction: ~1.4GB (24% smaller)
-#
-# Runtime Buffer: ~500MB (for runtime caches)
-# Total Recommended: ~5.0GB
-#
-# Note: On Zeabur, typically included in container allocation
-#
-# ============================================================
-# DEPENDENCY COMPATIBILITY MATRIX
-# ============================================================
-#
-# Python 3.11:        ✅ All packages support
-# Python 3.12:        ✅ All packages support (except uvloop on Windows)
-# Python 3.13:        ⚠️  Test before deploying (cutting edge)
-#
-# torch (CPU):        ✅ Recommended (no GPU needed)
-# torch (GPU CUDA):   ⚠️  Requires NVIDIA GPU + CUDA toolkit
-#
-# torch 2.1.0+:       ✅ Required by sentence-transformers (torch.compiler)
-# torch 2.0.x:        ❌ Too old (missing torch.compiler attribute)
-#
-# Playwright:         ✅ Chromium only (sufficient)
-#                     ⚠️  Firefox/WebKit not installed (saves space)
-#
-# uvloop:             ✅ Recommended on Linux/macOS
-#                     ❌ Not available on Windows
-#
-# NumPy:              ✅ v1.24.x (stable)
-#                     ❌ v2.0+ (breaking changes)
-#
-# httpx:              ✅ v0.27.2+ (required by crawl4ai)
-#                     ❌ v0.25.1-0.27.1 (incompatible with crawl4ai)
-#
-# ============================================================
-# SOLUTION MAPPING TO REQUIREMENTS
-# ============================================================
-#
-# SOLUTION 1 (Aggressive Stopping Prevention)
-#   → Implemented in main.py AdaptiveConfig
-#   → No specific package requirement
-#
-# SOLUTION 2 (Better Embedding Model)
-#   → sentence-transformers>=2.2.0 (supports mpnet-base-v2)
-#   → torch>=2.1.0 (FIX: updated from 2.0.0)
-#   → transformers>=4.30.0 (model loading)
-#   → numpy>=1.24.3 (vector operations)
-#
-# SOLUTION 3 (Better Re-ranking Weights)
-#   → httpx>=0.27.2 (FIX: updated from 0.25.1)
-#   → numpy>=1.24.3 (cosine similarity calculations)
-#   → pydantic>=2.5.0 (response validation)
-#
-# SOLUTION 4 (More Query Variations)
-#   → Implemented in main.py AdaptiveConfig
-#   → No specific package requirement
-#
-# SOLUTION 5 (Deeper Crawling)
-#   → crawl4ai>=0.7.0 (better crawling capabilities)
-#   → playwright>=1.40.0 (robust browser control)
-#
-# SOLUTION 6 (Proper Content Extraction)
-#   → crawl4ai>=0.7.0 (improved markdown extraction)
-#   → playwright>=1.40.0 (better .asp file parsing)
-#
-# ============================================================
-# CRITICAL FIXES APPLIED
-# ============================================================
-#
-# FIX 1: PyTorch Version Conflict
-#   - OLD: torch>=2.0.0,<2.1.0
-#   - NEW: torch>=2.1.0,<3.0.0
-#   - REASON: sentence-transformers requires torch.compiler (PyTorch 2.1+)
-#   - ERROR: "module 'torch' has no attribute 'compiler'"
-#
-# FIX 2: httpx Version Conflict
-#   - OLD: httpx>=0.25.1,<0.26.0
-#   - NEW: httpx>=0.27.2
-#   - REASON: crawl4ai requires httpx>=0.27.2
-#   - ERROR: "Conflicting dependencies"
-#
-# ============================================================
-# SECURITY & BEST PRACTICES
-# ============================================================
-#
-# API Keys:
-#   - NEVER commit .env file with real keys
-#   - Use environment variables or .env.local
-#   - See .env.example for template
-#   - Rotate keys regularly
-#
-# Dependency Scanning:
-#   - Regularly check: pip list --outdated
-#   - Update patch versions frequently (1.2.3 → 1.2.4)
-#   - Test minor version updates (1.2.x → 1.3.x) in staging
-#   - Carefully review major version updates (1.x → 2.x)
-#
-# Version Pinning:
-#   - Critical packages: pinned to minor version where needed
-#   - Prevents unexpected breaking changes
-#   - Allows security patches within compatible versions
-#
-# Supply Chain Security:
-#   - Use pip hash checking: pip install -r requirements.txt --require-hashes
-#   - Verify package signatures when possible
-#   - Monitor security advisories: pip audit
-#
-# ============================================================
-# TROUBLESHOOTING
-# ============================================================
-#
-# ERROR: "module 'torch' has no attribute 'compiler'"
-#   → PyTorch version too old
-#   → Solution: Updated torch to >=2.1.0
-#   → Clear cache: pip cache purge
-#   → Reinstall: pip install -r requirements.txt --force-reinstall
-#
-# ERROR: "Conflicting dependencies"
-#   → httpx version conflict with crawl4ai
-#   → Solution: Updated httpx to >=0.27.2
-#   → Clear cache: pip cache purge
-#   → Reinstall: pip install -r requirements.txt --force-reinstall
-#
-# ERROR: "No module named 'asyncio'"
-#   → asyncio is built-in with Python 3.11+
-#   → Should not see this error (report if you do)
-#
-# ERROR: "playwright browsers not found"
-#   → Run: python -m playwright install chromium
-#   → Dockerfile handles this automatically
-#
-# ERROR: "sentence-transformers model not found"
-#   → Model auto-downloads on first use
-#   → Or pre-download: python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2')"
-#
-# ERROR: "numpy compatibility issue"
-#   → Ensure numpy <2.0.0: pip install "numpy<2.0.0"
-#   → Clear cache if needed: pip cache purge
-#
+# Docker:
+#   docker build -t crawl4ai:v3.8.0 .
+#   docker run --env-file .env -p 8080:8080 crawl4ai:v3.8.0
 # ============================================================
