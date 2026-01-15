@@ -654,15 +654,6 @@ async def run_adaptive_crawl(
             confidence=round(confidence, 3),
             pages_crawled=pages_crawled,
             sources=sources,
-			# Determine which strategy was actually used for the message
-        crawl_strategy = "embedding" if used_embedding_crawl else "statistical"
-
-        return CrawlResponse(
-            success=True,
-            answer=answer,
-            confidence=round(confidence, 3),
-            pages_crawled=pages_crawled,
-            sources=sources,
             message=f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence:.0%} confidence" +
                     (" (with OpenRouter re-ranking)" if embedding_used else ""),
             embedding_used=embedding_used or used_embedding_crawl
