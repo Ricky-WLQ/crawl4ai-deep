@@ -1,3 +1,4 @@
+
 """
 Crawl4AI Adaptive Crawler with LOCAL MULTILINGUAL EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
 
@@ -373,11 +374,11 @@ def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) 
         # Truncate individual page content
         page_text = content[:5000] if len(content) > 5000 else content
 
-        # Show both scores if embedding was used
+        # ✅ FIXED: Changed {score:.0%} to {score*100:.0f}%
         if embedding_score is not None:
-            score_info = f"Combined: {score:.0%}, Semantic: {embedding_score:.0%}"
+            score_info = f"Combined: {score*100:.0f}%, Semantic: {embedding_score*100:.0f}%"
         else:
-            score_info = f"Relevance: {score:.0%}"
+            score_info = f"Relevance: {score*100:.0f}%"
 
         entry = f"""
 === Page {i} ({score_info}): {url} ===
@@ -620,7 +621,9 @@ async def run_adaptive_crawl(
         strategy_name = "Embedding" if used_embedding_crawl else "BM25"
         print(f"\n{strategy_name} top pages (before re-ranking):", flush=True)
         for i, page in enumerate(relevant_pages[:5], 1):
-            print(f"  {i}. {page.get('score', 0):.0%} - {page.get('url', 'unknown')}", flush=True)
+            # ✅ FIXED: Changed {page.get('score', 0):.0%} to {score_val*100:.0f}%
+            score_val = page.get('score', 0)
+            print(f"  {i}. {score_val*100:.0f}% - {page.get('url', 'unknown')}", flush=True)
 
         # Re-rank with OpenRouter embeddings if available
         embedding_used = False
@@ -638,7 +641,10 @@ async def run_adaptive_crawl(
                 print(f"After OpenRouter re-ranking:", flush=True)
                 for i, page in enumerate(relevant_pages[:5], 1):
                     emb_score = page.get('embedding_score', 0)
-                    print(f"  {i}. Combined: {page['score']:.0%} (Semantic: {emb_score:.0%}) - {page['url']}", flush=True)
+                    # ✅ FIXED: Changed {page['score']:.0%} and {emb_score:.0%}
+                    combined_score = page['score'] * 100
+                    emb_score_pct = emb_score * 100
+                    print(f"  {i}. Combined: {combined_score:.0f}% (Semantic: {emb_score_pct:.0f}%) - {page['url']}", flush=True)
             except Exception as e:
                 print(f"OpenRouter re-ranking failed: {e}, using crawl results", flush=True)
                 relevant_pages = relevant_pages[:15]
@@ -687,6 +693,7 @@ async def run_adaptive_crawl(
 
         crawl_strategy = "embedding" if used_embedding_crawl else "statistical"
 
+        # ✅ FIXED: Changed {confidence:.0%} to {confidence*100:.0f}%
         return CrawlResponse(
             success=True,
             answer=answer,
@@ -694,7 +701,7 @@ async def run_adaptive_crawl(
             pages_crawled=pages_crawled,
             sources=sources,
             message=(
-                f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence:.0%} confidence" +
+                f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence*100:.0f}% confidence" +
                 (" (with OpenRouter re-ranking)" if embedding_used else "")
             ),
             embedding_used=embedding_used or used_embedding_crawl
@@ -854,6 +861,7 @@ async def run_fallback_deep_crawl(
                 source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)
             sources.append(source_info)
 
+        # ✅ FIXED: Changed {confidence*100:.0f}% format
         return CrawlResponse(
             success=True,
             answer=answer,
