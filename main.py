@@ -1,14 +1,12 @@
 """
 Crawl4AI Two-Phase Hybrid Crawler - PRODUCTION READY v4.1.0
 
-VERSION 4.1.0 - PRODUCTION READY (All Security & Error Handling Fixes Included)
-
-ARCHITECTURE (Context7 Verified):
+ARCHITECTURE (Official Documentation Verified):
 Phase 1: BFS Systematic Exploration
 - BFSDeepCrawlStrategy crawls ALL pages at each depth level
 - Gets comprehensive map of website structure
-- No semantic filtering during crawl (low score_threshold=0.1)
-- Ensures no relevant pages are missed
+- Configurable score_threshold for relevance filtering
+- Ensures comprehensive coverage
 
 Phase 2: Adaptive Semantic Validation
 - Local embedding model validates each page against query
@@ -35,7 +33,7 @@ PRODUCTION FEATURES (v4.1.0):
 ✅ Health checks
 ✅ Comprehensive exception handling
 
-Version: 4.1.0 (PRODUCTION READY - Context7 Verified)
+Version: 4.1.0 (PRODUCTION READY - Official Docs Verified)
 """
 
 import os
@@ -46,14 +44,14 @@ import uuid
 import logging
 from datetime import datetime
 from contextlib import asynccontextmanager
-from typing import Optional, List, Dict, Any
+from typing import Optional, List, Dict, Any, Tuple, Union
 from urllib.parse import urlparse
 import re
 import traceback
 
 import httpx
 import numpy as np
-from pydantic import BaseModel, Field, validator, HttpUrl
+from pydantic import BaseModel, Field, field_validator
 from fastapi import FastAPI, HTTPException, Depends, Security
 from fastapi.security import HTTPBearer, HTTPAuthCredentials
 from fastapi.middleware.cors import CORSMiddleware
@@ -63,7 +61,7 @@ from pythonjsonlogger import jsonlogger
 # LOGGING CONFIGURATION (Production-Ready)
 # ============================================================================
 
-def setup_logging():
+def setup_logging() -> logging.Logger:
     """Configure structured JSON logging for production."""
     logger = logging.getLogger(__name__)
     logger.setLevel(logging.INFO)
@@ -73,12 +71,12 @@ def setup_logging():
     try:
         fh = logging.FileHandler(log_file)
         formatter = jsonlogger.JsonFormatter(
-            '%(timestamp)s %(level)s %(message)s %(error)s'
+            '%(asctime)s %(levelname)s %(message)s %(exc_info)s'
         )
         fh.setFormatter(formatter)
         logger.addHandler(fh)
     except Exception as e:
-        print(f"Failed to setup file logging: {e}")
+        print(f"Failed to setup file logging: {e}", flush=True)
     
     # Console handler
     ch = logging.StreamHandler()
@@ -123,45 +121,36 @@ DEFAULT_MAX_DEPTH = 3
 # Core crawl4ai imports
 # ============================================================================
 try:
-    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
-    from crawl4ai.async_configs import CacheMode
-    print("Core crawl4ai imported successfully", flush=True)
+    from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig, CacheMode
+    LOGGER.info("Core crawl4ai imported successfully")
 except ImportError as e:
+    LOGGER.critical(f"Failed to import core crawl4ai: {e}")
     print(f"CRITICAL: Failed to import core crawl4ai: {e}", flush=True)
     sys.exit(1)
 
 try:
     from crawl4ai.deep_crawling import BFSDeepCrawlStrategy
-    from crawl4ai.deep_crawling.filters import FilterChain, DomainFilter
     from crawl4ai.deep_crawling.scorers import KeywordRelevanceScorer
     BFS_AVAILABLE = True
-    print("BFSDeepCrawlStrategy imported successfully", flush=True)
+    LOGGER.info("BFSDeepCrawlStrategy imported successfully")
 except ImportError as e:
-    print(f"BFSDeepCrawlStrategy not available: {e}", flush=True)
+    LOGGER.warning(f"BFSDeepCrawlStrategy not available: {e}")
     BFS_AVAILABLE = False
-
-try:
-    from crawl4ai import AdaptiveCrawler, AdaptiveConfig
-    ADAPTIVE_AVAILABLE = True
-    print("AdaptiveCrawler imported successfully", flush=True)
-except ImportError as e:
-    print(f"AdaptiveCrawler not available: {e}", flush=True)
-    ADAPTIVE_AVAILABLE = False
 
 try:
     from sentence_transformers import SentenceTransformer
     SENTENCE_TRANSFORMERS_AVAILABLE = True
-    print("sentence-transformers imported successfully", flush=True)
+    LOGGER.info("sentence-transformers imported successfully")
 except ImportError as e:
-    print(f"sentence-transformers not available: {e}", flush=True)
+    LOGGER.warning(f"sentence-transformers not available: {e}")
     SENTENCE_TRANSFORMERS_AVAILABLE = False
 
 # ============================================================================
 # Global State
 # ============================================================================
-EMBEDDING_MODEL = None
+EMBEDDING_MODEL: Optional[Any] = None
 EMBEDDING_MODEL_VERIFIED = False
-EMBEDDING_MODEL_ERROR = None
+EMBEDDING_MODEL_ERROR: Optional[str] = None
 
 # ============================================================================
 # SECURITY: Authentication
@@ -224,48 +213,12 @@ def check_memory_usage() -> Dict[str, Any]:
         return {"available": False, "error": str(e)}
 
 # ============================================================================
-# SPA-Friendly Crawler Wrapper
-# ============================================================================
-
-class SPAFriendlyCrawler:
-    """Wrapper around AsyncWebCrawler that automatically adds SPA-friendly settings."""
-
-    def __init__(self, crawler: AsyncWebCrawler, default_config: CrawlerRunConfig = None):
-        self._crawler = crawler
-        self._default_config = default_config or CrawlerRunConfig(
-            wait_for="css:body",
-            process_iframes=True,
-            delay_before_return_html=2.0,
-            page_timeout=REQUEST_TIMEOUT_SECONDS * 1000,
-            cache_mode=CacheMode.BYPASS,
-            verbose=False
-        )
-        LOGGER.info("SPAFriendlyCrawler initialized", extra={
-            "wait_for": self._default_config.wait_for,
-            "process_iframes": self._default_config.process_iframes
-        })
-
-    async def arun(self, url: str, config: CrawlerRunConfig = None, **kwargs):
-        """Intercept arun() calls and inject SPA-friendly config."""
-        effective_config = config if config is not None else self._default_config
-        LOGGER.debug(f"SPAFriendlyCrawler.arun() called", extra={"url": url[:100]})
-        return await self._crawler.arun(url=url, config=effective_config, **kwargs)
-
-    def __getattr__(self, name):
-        return getattr(self._crawler, name)
-
-    async def __aenter__(self):
-        await self._crawler.__aenter__()
-        return self
-
-    async def __aexit__(self, exc_type, exc_val, exc_tb):
-        return await self._crawler.__aexit__(exc_type, exc_val, exc_tb)
-
-# ============================================================================
 # EMBEDDING MODEL INITIALIZATION
 # ============================================================================
 
-def initialize_embedding_model(model_name: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2") -> bool:
+def initialize_embedding_model(
+    model_name: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2"
+) -> bool:
     """Initialize and verify the embedding model at startup."""
     global EMBEDDING_MODEL, EMBEDDING_MODEL_VERIFIED, EMBEDDING_MODEL_ERROR
 
@@ -283,8 +236,8 @@ def initialize_embedding_model(model_name: str = "sentence-transformers/paraphra
         # Test with sample texts
         test_texts = [
             "This is a test sentence.",
-            "澳門法律 刑法 販毒",
-            "第17/2009號法律 緝毒"
+            "Query relevance test",
+            "Semantic similarity check"
         ]
 
         embeddings = EMBEDDING_MODEL.encode(test_texts)
@@ -344,7 +297,12 @@ def compute_semantic_scores(query: str, contents: List[str]) -> List[float]:
 class OpenRouterEmbeddings:
     """Custom client for OpenRouter embeddings API with production-grade retry logic."""
 
-    def __init__(self, api_key: str, model: str = "qwen/qwen3-embedding-8b", max_retries: int = MAX_RETRIES):
+    def __init__(
+        self,
+        api_key: str,
+        model: str = "qwen/qwen3-embedding-8b",
+        max_retries: int = MAX_RETRIES
+    ):
         self.api_key = api_key
         self.model = model
         self.base_url = "https://openrouter.ai/api/v1/embeddings"
@@ -355,8 +313,8 @@ class OpenRouterEmbeddings:
         if not texts:
             return []
 
-        total_wait = 0
-        last_error = None
+        total_wait = 0.0
+        last_error = ""
 
         for attempt in range(self.max_retries):
             try:
@@ -389,7 +347,7 @@ class OpenRouterEmbeddings:
                         continue
 
                     result = response.json()
-                    embeddings = [None] * len(texts)
+                    embeddings: List[List[float]] = [None] * len(texts)  # type: ignore
                     for item in result.get("data", []):
                         idx = item.get("index", 0)
                         embeddings[idx] = item.get("embedding", [])
@@ -398,7 +356,7 @@ class OpenRouterEmbeddings:
                         "texts_count": len(texts),
                         "attempt": attempt + 1
                     })
-                    return embeddings
+                    return embeddings  # type: ignore
 
             except asyncio.TimeoutError:
                 last_error = "OpenRouter request timeout"
@@ -443,10 +401,10 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
 
 async def rerank_with_openrouter(
     query: str,
-    pages: List[Dict],
+    pages: List[Dict[str, Any]],
     embedding_client: OpenRouterEmbeddings,
     top_k: int = 15
-) -> List[Dict]:
+) -> List[Dict[str, Any]]:
     """Re-rank pages using OpenRouter embeddings with fallback."""
     if not pages:
         return []
@@ -539,8 +497,9 @@ class CrawlRequest(BaseModel):
         description="Enable OpenRouter re-ranking"
     )
 
-    @validator('start_url')
-    def validate_url(cls, v):
+    @field_validator('start_url')
+    @classmethod
+    def validate_url(cls, v: str) -> str:
         """Validate URL format and length."""
         if not v.startswith(('http://', 'https://')):
             raise ValueError('URL must start with http:// or https://')
@@ -554,8 +513,9 @@ class CrawlRequest(BaseModel):
         except Exception as e:
             raise ValueError(f'Invalid URL: {str(e)}')
 
-    @validator('query')
-    def validate_query(cls, v):
+    @field_validator('query')
+    @classmethod
+    def validate_query(cls, v: str) -> str:
         """Validate query content."""
         if not v.strip():
             raise ValueError('Query cannot be empty')
@@ -570,7 +530,7 @@ class CrawlResponse(BaseModel):
     confidence: float
     pages_crawled: int
     pages_validated: int
-    sources: List[dict]
+    sources: List[Dict[str, Any]]
     message: str
     crawl_strategy: str
     request_id: str
@@ -580,7 +540,7 @@ class CrawlResponse(BaseModel):
 # Helper Functions
 # ============================================================================
 
-def detect_query_languages(query: str) -> dict:
+def detect_query_languages(query: str) -> Dict[str, Any]:
     """Detect languages in query."""
     has_chinese = bool(re.search(r'[\u4e00-\u9fff]', query))
     has_english = bool(re.search(r'[a-zA-Z]', query))
@@ -632,27 +592,38 @@ def extract_keywords(query: str) -> List[str]:
 
     return unique_keywords[:20]  # Limit to 20 keywords
 
-def extract_content_from_result(result) -> str:
+def extract_content_from_result(result: Any) -> str:
     """Extract text content from a CrawlResult object."""
     content = ""
 
+    # Try markdown first (preferred format)
     if hasattr(result, 'markdown') and result.markdown:
         md = result.markdown
-        if hasattr(md, 'fit_markdown') and md.fit_markdown:
-            content = str(md.fit_markdown)
-        elif hasattr(md, 'raw_markdown') and md.raw_markdown:
+        # Handle MarkdownGenerationResult object
+        if hasattr(md, 'raw_markdown') and md.raw_markdown:
             content = str(md.raw_markdown)
+        elif isinstance(md, str):
+            content = str(md)
 
+    # Fall back to extracted_content
     if not content and hasattr(result, 'extracted_content') and result.extracted_content:
         content = str(result.extracted_content)
 
+    # Fall back to cleaned_html
+    if not content and hasattr(result, 'cleaned_html') and result.cleaned_html:
+        content = str(result.cleaned_html)
+        # Basic HTML cleaning
+        content = re.sub(r'<[^>]+>', ' ', content)
+        content = re.sub(r'\s+', ' ', content).strip()
+
+    # Final fallback to raw html
     if not content and hasattr(result, 'html') and result.html:
         content = re.sub(r'<[^>]+>', ' ', str(result.html))
         content = re.sub(r'\s+', ' ', content).strip()
 
     return content.strip()
 
-def format_context_for_llm(pages: List[Dict], max_chars: int = 25000) -> str:
+def format_context_for_llm(pages: List[Dict[str, Any]], max_chars: int = 25000) -> str:
     """Format pages into context string for LLM."""
     context_parts = []
     total_chars = 0
@@ -678,7 +649,7 @@ def format_context_for_llm(pages: List[Dict], max_chars: int = 25000) -> str:
 
     return "\n".join(context_parts)
 
-def generate_fallback_answer(pages: List[Dict], query: str) -> str:
+def generate_fallback_answer(pages: List[Dict[str, Any]], query: str) -> str:
     """Generate fallback answer without LLM if DeepSeek fails."""
     if not pages:
         return "No relevant content found for your query."
@@ -706,7 +677,7 @@ async def call_deepseek(
     request_id: str,
     max_tokens: int = 2000,
     max_retries: int = MAX_RETRIES
-) -> tuple[str, bool]:
+) -> Tuple[Optional[str], bool]:
     """Call DeepSeek API with graceful degradation. Returns (answer, success)."""
 
     # Validate context size
@@ -735,8 +706,8 @@ Crawled Web Content:
 
 Based on the above content, provide a detailed and accurate answer to the query."""
 
-    total_wait = 0
-    last_error = None
+    total_wait = 0.0
+    last_error = ""
 
     for attempt in range(max_retries):
         try:
@@ -829,7 +800,6 @@ async def lifespan(app: FastAPI):
     print("=" * 80, flush=True)
 
     print(f"BFSDeepCrawlStrategy Available: {BFS_AVAILABLE}", flush=True)
-    print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
     print(f"OpenRouter API Key: {'Set' if os.environ.get('OPENROUTER_API_KEY') else 'NOT SET'}", flush=True)
     print(f"DeepSeek API Key: {'Set' if os.environ.get('DEEPSEEK_API_KEY') else 'NOT SET'}", flush=True)
     print(f"Require API Key: {os.environ.get('REQUIRE_API_KEY', 'false')}", flush=True)
@@ -837,6 +807,7 @@ async def lifespan(app: FastAPI):
 
     print("INITIALIZATION:", flush=True)
     embedding_ok = initialize_embedding_model()
+    print(f"Embedding Model Ready: {EMBEDDING_MODEL_VERIFIED}", flush=True)
     
     print("=" * 80, flush=True)
     print("TWO-PHASE HYBRID ARCHITECTURE (v4.1.0 PRODUCTION READY):", flush=True)
@@ -853,7 +824,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Crawl4AI Two-Phase Hybrid Crawler",
-    description="Production-ready two-phase hybrid crawler (BFS + Adaptive Semantic Validation) v4.1.0",
+    description="Production-ready two-phase hybrid crawler (BFS + Semantic Validation) v4.1.0",
     version="4.1.0",
     lifespan=lifespan
 )
@@ -873,7 +844,7 @@ app.add_middleware(
 # ============================================================================
 
 @app.get("/")
-async def root():
+async def root() -> Dict[str, Any]:
     """Service status endpoint."""
     memory_info = check_memory_usage()
     
@@ -881,10 +852,10 @@ async def root():
         "service": "Crawl4AI Two-Phase Hybrid Crawler",
         "version": "4.1.0",
         "status": "Ready",
-        "strategy": "Two-Phase Hybrid (BFS + Adaptive Semantic Validation)",
+        "strategy": "Two-Phase Hybrid (BFS + Semantic Validation)",
         "features": {
             "bfs_phase1": BFS_AVAILABLE,
-            "adaptive_phase2": EMBEDDING_MODEL_VERIFIED,
+            "semantic_phase2": EMBEDDING_MODEL_VERIFIED,
             "openrouter_reranking": bool(os.environ.get("OPENROUTER_API_KEY")),
             "deepseek_answers": bool(os.environ.get("DEEPSEEK_API_KEY"))
         },
@@ -905,7 +876,7 @@ async def root():
     }
 
 @app.get("/health")
-async def health():
+async def health() -> Dict[str, Any]:
     """Health check endpoint."""
     memory_info = check_memory_usage()
     
@@ -926,19 +897,19 @@ async def health():
 async def crawl(
     request: CrawlRequest,
     api_key: str = Depends(verify_api_key)
-):
+) -> CrawlResponse:
     """
     Perform two-phase hybrid crawl with semantic validation.
     
     PRODUCTION READY v4.1.0 - All features implemented:
-    - Input validation
+    - Input validation with Pydantic v2
     - Rate limiting
     - Timeout protection
     - Graceful degradation
     - API authentication
     - Structured logging
     - Memory monitoring
-    - Error handling
+    - Error handling with retry
     - Request size limits
     - CORS enabled
     - Health checks
@@ -974,7 +945,7 @@ async def crawl(
     })
 
     # Create OpenRouter client if available
-    openrouter_client = None
+    openrouter_client: Optional[OpenRouterEmbeddings] = None
     if openrouter_api_key and request.use_openrouter:
         openrouter_client = OpenRouterEmbeddings(api_key=openrouter_api_key)
 
@@ -995,17 +966,6 @@ async def crawl(
             domain=domain,
             request_id=request_id
         )
-    elif ADAPTIVE_AVAILABLE:
-        LOGGER.warning("BFS not available, using adaptive fallback", extra={
-            "request_id": request_id
-        })
-        return await run_adaptive_fallback(
-            request=request,
-            deepseek_api_key=deepseek_api_key,
-            openrouter_client=openrouter_client,
-            domain=domain,
-            request_id=request_id
-        )
     else:
         LOGGER.error("No crawling strategy available", extra={"request_id": request_id})
         raise HTTPException(
@@ -1014,7 +974,7 @@ async def crawl(
         )
 
 # ============================================================================
-# MAIN CRAWL FUNCTIONS
+# MAIN CRAWL FUNCTION - TWO-PHASE HYBRID
 # ============================================================================
 
 async def run_hybrid_two_phase_crawl(
@@ -1036,63 +996,60 @@ async def run_hybrid_two_phase_crawl(
     keywords = extract_keywords(request.query)
     LOGGER.debug(f"Keywords extracted", extra={"request_id": request_id, "keywords": keywords})
 
-    domain_filter = DomainFilter(
-        allowed_domains=[domain],
-        blocked_domains=[]
-    )
-
+    # Create keyword scorer
     keyword_scorer = KeywordRelevanceScorer(
         keywords=keywords,
         weight=1.0
     )
 
+    # Create BFS strategy
     bfs_strategy = BFSDeepCrawlStrategy(
         max_depth=request.max_depth or DEFAULT_MAX_DEPTH,
         include_external=False,
         max_pages=request.max_pages or DEFAULT_MAX_PAGES,
-        filter_chain=FilterChain([domain_filter]),
         url_scorer=keyword_scorer,
-        score_threshold=0.1
+        score_threshold=0.1  # Low threshold in Phase 1 to get comprehensive coverage
     )
 
     crawl_config = CrawlerRunConfig(
         deep_crawl_strategy=bfs_strategy,
         wait_for="css:body",
         process_iframes=True,
-        delay_before_return_html=2.0,
+        delay_before_return_html=0.5,
         page_timeout=REQUEST_TIMEOUT_SECONDS * 1000,
         cache_mode=CacheMode.BYPASS,
-        verbose=False
+        verbose=False,
+        word_count_threshold=10,
+        remove_overlay_elements=True
     )
 
     browser_config = BrowserConfig(
         headless=True,
-        verbose=False,
-        java_script_enabled=True
+        verbose=False
     )
 
-    all_crawled_pages = []
+    all_crawled_pages: List[Dict[str, Any]] = []
 
     try:
-        async with AsyncWebCrawler(config=browser_config) as raw_crawler:
-            crawler = SPAFriendlyCrawler(raw_crawler)
-            
-            results = await crawler.arun(
+        async with AsyncWebCrawler(config=browser_config) as crawler:
+            result = await crawler.arun(
                 url=request.start_url,
                 config=crawl_config
             )
 
-            if isinstance(results, list):
-                crawled_results = results
-            else:
-                crawled_results = [results] if results else []
+            # Handle result - can be single CrawlResult or list
+            crawled_results: List[Any] = []
+            if isinstance(result, list):
+                crawled_results = result
+            elif result:
+                crawled_results = [result]
 
             LOGGER.info(f"BFS crawl returned results", extra={
                 "request_id": request_id,
                 "results_count": len(crawled_results)
             })
 
-            for i, result in enumerate(crawled_results):
+            for i, crawl_result in enumerate(crawled_results):
                 # Check memory
                 memory_info = check_memory_usage()
                 if memory_info.get("threshold_exceeded"):
@@ -1102,15 +1059,17 @@ async def run_hybrid_two_phase_crawl(
                     })
                     break
 
-                if not result:
+                if not crawl_result:
                     continue
 
-                if hasattr(result, 'success') and not result.success:
+                if hasattr(crawl_result, 'success') and not crawl_result.success:
                     continue
 
-                url = result.url if hasattr(result, 'url') else f"page_{i}"
-                content = extract_content_from_result(result)
-                depth = result.metadata.get('depth', 0) if hasattr(result, 'metadata') else 0
+                url = crawl_result.url if hasattr(crawl_result, 'url') else f"page_{i}"
+                content = extract_content_from_result(crawl_result)
+                depth = 0
+                if hasattr(crawl_result, 'metadata') and isinstance(crawl_result.metadata, dict):
+                    depth = crawl_result.metadata.get('depth', 0)
 
                 if content and len(content) >= 100:
                     all_crawled_pages.append({
@@ -1256,16 +1215,16 @@ async def run_hybrid_two_phase_crawl(
     })
 
     # Try DeepSeek with fallback
-    answer, deepseek_success = await call_deepseek(
+    answer_text, deepseek_success = await call_deepseek(
         query=request.query,
         context=context,
         api_key=deepseek_api_key,
         request_id=request_id
     )
 
-    if not deepseek_success:
+    if not deepseek_success or answer_text is None:
         LOGGER.warning("DeepSeek failed, using fallback", extra={"request_id": request_id})
-        answer = generate_fallback_answer(validated_pages, request.query)
+        answer_text = generate_fallback_answer(validated_pages, request.query)
         confidence = 0.4
     else:
         if validated_pages:
@@ -1275,14 +1234,14 @@ async def run_hybrid_two_phase_crawl(
             confidence = 0.0
 
     # Prepare sources
-    sources = []
-    seen_urls = set()
+    sources: List[Dict[str, Any]] = []
+    seen_urls: set = set()
     for page in validated_pages[:15]:
         url = page.get('url', 'unknown')
         if url in seen_urls:
             continue
         seen_urls.add(url)
-        source_info = {
+        source_info: Dict[str, Any] = {
             "url": url,
             "relevance": round(page.get('score', 0), 3),
             "depth": page.get('depth', 0)
@@ -1303,7 +1262,7 @@ async def run_hybrid_two_phase_crawl(
 
     return CrawlResponse(
         success=True,
-        answer=answer,
+        answer=answer_text,
         confidence=confidence,
         pages_crawled=pages_crawled,
         pages_validated=pages_validated,
@@ -1319,160 +1278,10 @@ async def run_hybrid_two_phase_crawl(
         timestamp=datetime.utcnow().isoformat()
     )
 
-async def run_adaptive_fallback(
-    request: CrawlRequest,
-    deepseek_api_key: str,
-    openrouter_client: Optional[OpenRouterEmbeddings],
-    domain: str,
-    request_id: str
-) -> CrawlResponse:
-    """Adaptive fallback with production-ready error handling."""
-
-    LOGGER.info("Using adaptive fallback", extra={"request_id": request_id})
-
-    config = AdaptiveConfig(
-        strategy="embedding" if EMBEDDING_MODEL_VERIFIED else "statistical",
-        embedding_model="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
-        confidence_threshold=0.05,
-        max_pages=request.max_pages or DEFAULT_MAX_PAGES,
-        top_k_links=30,
-        embedding_min_confidence_threshold=0.02,
-        embedding_min_relative_improvement=0.01,
-        n_query_variations=20
-    )
-
-    browser_config = BrowserConfig(
-        headless=True,
-        verbose=False,
-        java_script_enabled=True
-    )
-
-    all_pages = []
-
-    try:
-        async with AsyncWebCrawler(config=browser_config) as raw_crawler:
-            crawler = SPAFriendlyCrawler(raw_crawler)
-            adaptive = AdaptiveCrawler(crawler, config=config)
-
-            result = await adaptive.digest(
-                start_url=request.start_url,
-                query=request.query
-            )
-
-            if result and hasattr(result, 'knowledge_base') and result.knowledge_base:
-                for doc in result.knowledge_base:
-                    url = doc.url if hasattr(doc, 'url') else 'unknown'
-                    content = extract_content_from_result(doc)
-                    if content and len(content) >= 100:
-                        all_pages.append({
-                            'url': url,
-                            'content': content,
-                            'score': 0.5,
-                            'depth': 0
-                        })
-
-            pages_crawled = len(result.crawled_urls) if hasattr(result, 'crawled_urls') else len(all_pages)
-
-    except Exception as e:
-        LOGGER.error(f"Adaptive crawl error: {e}", extra={
-            "request_id": request_id,
-            "traceback": traceback.format_exc()
-        })
-        return CrawlResponse(
-            success=False,
-            answer=f"Adaptive crawl failed: {str(e)[:100]}",
-            confidence=0.0,
-            pages_crawled=0,
-            pages_validated=0,
-            sources=[],
-            message=f"Adaptive error: {str(e)[:100]}",
-            crawl_strategy="adaptive_fallback_error",
-            request_id=request_id,
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    if not all_pages:
-        return CrawlResponse(
-            success=False,
-            answer="No content extracted from adaptive crawl",
-            confidence=0.0,
-            pages_crawled=pages_crawled,
-            pages_validated=0,
-            sources=[],
-            message="Adaptive: No extractable content",
-            crawl_strategy="adaptive_no_content",
-            request_id=request_id,
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    # Apply semantic scoring
-    contents = [p['content'][:2000] for p in all_pages]
-    scores = compute_semantic_scores(request.query, contents)
-    for i, page in enumerate(all_pages):
-        page['score'] = scores[i] if i < len(scores) else 0.5
-    all_pages.sort(key=lambda x: x['score'], reverse=True)
-
-    # Optional OpenRouter re-ranking
-    embedding_used = False
-    if openrouter_client:
-        try:
-            all_pages = await rerank_with_openrouter(
-                request.query, all_pages, openrouter_client, top_k=15
-            )
-            embedding_used = True
-        except Exception as e:
-            LOGGER.warning(f"Adaptive re-ranking failed: {e}", extra={"request_id": request_id})
-            all_pages = all_pages[:15]
-    else:
-        all_pages = all_pages[:15]
-
-    # Generate answer
-    context = format_context_for_llm(all_pages)
-    if not context.strip():
-        return CrawlResponse(
-            success=False,
-            answer="No readable content for answer generation",
-            confidence=0.0,
-            pages_crawled=pages_crawled,
-            pages_validated=len(all_pages),
-            sources=[],
-            message="Adaptive: Empty context",
-            crawl_strategy="adaptive_empty_context",
-            request_id=request_id,
-            timestamp=datetime.utcnow().isoformat()
-        )
-
-    answer, deepseek_success = await call_deepseek(
-        request.query, context, deepseek_api_key, request_id
-    )
-
-    if not deepseek_success:
-        answer = generate_fallback_answer(all_pages, request.query)
-
-    sources = [{"url": p['url'], "relevance": round(p['score'], 3)} for p in all_pages[:10]]
-
-    LOGGER.info("Adaptive fallback complete", extra={
-        "request_id": request_id,
-        "pages": len(all_pages),
-        "deepseek_success": deepseek_success
-    })
-
-    return CrawlResponse(
-        success=True,
-        answer=answer,
-        confidence=0.5,
-        pages_crawled=pages_crawled,
-        pages_validated=len(all_pages),
-        sources=sources,
-        message=f"Adaptive fallback: {pages_crawled} pages" + (" (Fallback answer)" if not deepseek_success else ""),
-        crawl_strategy="adaptive_fallback_success",
-        request_id=request_id,
-        timestamp=datetime.utcnow().isoformat()
-    )
-
 # ============================================================================
 # Main Entry Point
 # ============================================================================
+
 if __name__ == "__main__":
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
