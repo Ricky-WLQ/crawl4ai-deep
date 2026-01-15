@@ -1,4 +1,5 @@
 
+
 """
 Crawl4AI Adaptive Crawler with LOCAL MULTILINGUAL EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
 
@@ -571,21 +572,169 @@ def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) 
 
 
 def extract_pages_from_result(result) -> List[dict]:
-    """FIX: Extract pages from adaptive crawl result with fallback handling."""
+    """
+    FIX: Extract pages from adaptive crawl result's knowledge base.
+    
+    CrawlState structure:
+    - result.knowledge_base: List of Document objects with extracted content
+    - result.crawled_urls: List of URLs crawled
+    - result.documents_with_terms: Dict mapping documents to extracted terms
+    """
     pages = []
     
-    try:
-        # Try multiple ways to extract pages
-        if hasattr(result, 'pages') and result.pages:
-            pages = result.pages
-        elif hasattr(result, 'get_relevant_content'):
-            pages = result.get_relevant_content(top_k=25)
-        elif hasattr(result, 'knowledge_base') and hasattr(result.knowledge_base, 'pages'):
-            pages = result.knowledge_base.pages
-    except Exception as e:
-        print(f"Error extracting pages: {e}", flush=True)
+    print(f"\n>>> extract_pages_from_result() called", flush=True)
     
-    return pages if pages else []
+    try:
+        # The knowledge_base contains the actual extracted content
+        if hasattr(result, 'knowledge_base') and result.knowledge_base:
+            kb = result.knowledge_base
+            print(f"  ✓ Knowledge base exists with {len(kb)} items", flush=True)
+            
+            if isinstance(kb, list):
+                print(f"  Processing {len(kb)} knowledge base items...", flush=True)
+                
+                # Each item should have url and content
+                for i, doc in enumerate(kb):
+                    try:
+                        extracted_page = None
+                        
+                        if isinstance(doc, dict):
+                            # Already a dict
+                            print(f"    [{i}] Dict with keys: {list(doc.keys())}", flush=True)
+                            content = doc.get('content') or doc.get('text') or doc.get('markdown')
+                            
+                            if content and len(str(content)) > 50:
+                                extracted_page = {
+                                    'url': doc.get('url', f'doc_{i}'),
+                                    'content': str(content),
+                                    'score': float(doc.get('score', 0.5))
+                                }
+                                print(f"      ✓ Extracted: {len(extracted_page['content'])} chars from {extracted_page['url'][:60]}", flush=True)
+                            else:
+                                content_len = len(str(content)) if content else 0
+                                print(f"      ✗ Content too short ({content_len} chars) or empty", flush=True)
+                        
+                        elif hasattr(doc, '__dict__'):
+                            # Object with attributes
+                            doc_type = type(doc).__name__
+                            print(f"    [{i}] Object type: {doc_type}", flush=True)
+                            
+                            # Try multiple content attributes
+                            content = None
+                            content_attr = None
+                            for attr_name in ['content', 'text', 'markdown', 'body', 'data', 'page_content']:
+                                if hasattr(doc, attr_name):
+                                    val = getattr(doc, attr_name, None)
+                                    if val and len(str(val)) > 50:
+                                        content = val
+                                        content_attr = attr_name
+                                        print(f"      Found .{attr_name}: {len(str(val))} chars", flush=True)
+                                        break
+                            
+                            # Try to get URL
+                            url = None
+                            for url_attr in ['url', 'link', 'page_url', 'source']:
+                                if hasattr(doc, url_attr):
+                                    url = getattr(doc, url_attr, None)
+                                    if url:
+                                        print(f"      Found .{url_attr}: {url[:60]}", flush=True)
+                                        break
+                            
+                            if content:
+                                extracted_page = {
+                                    'url': url or f'doc_{i}',
+                                    'content': str(content),
+                                    'score': float(getattr(doc, 'score', 0.5))
+                                }
+                                print(f"      ✓ Extracted: {len(extracted_page['content'])} chars", flush=True)
+                            else:
+                                attrs = [a for a in dir(doc) if not a.startswith('_')]
+                                print(f"      ✗ No content found. Attributes: {attrs[:15]}", flush=True)
+                        
+                        else:
+                            # Fallback: try string representation
+                            doc_type = type(doc).__name__
+                            print(f"    [{i}] Fallback for {doc_type}, trying str()", flush=True)
+                            content = str(doc)
+                            if len(content) > 50:
+                                extracted_page = {
+                                    'url': f'doc_{i}',
+                                    'content': content,
+                                    'score': 0.5
+                                }
+                                print(f"      ✓ Extracted: {len(extracted_page['content'])} chars from str()", flush=True)
+                            else:
+                                print(f"      ✗ str() content too short ({len(content)} chars)", flush=True)
+                        
+                        if extracted_page:
+                            pages.append(extracted_page)
+                    
+                    except Exception as e:
+                        print(f"    [{i}] ERROR: {str(e)}", flush=True)
+                        import traceback
+                        traceback.print_exc()
+            
+            else:
+                print(f"  ⚠️  KB is not a list, it's {type(kb).__name__}", flush=True)
+        
+        else:
+            print(f"  ⚠️  No knowledge_base or it's empty", flush=True)
+        
+        # Fallback: Try to use get_relevant_content() method if available
+        if not pages and hasattr(result, 'get_relevant_content'):
+            print(f"  Trying fallback: get_relevant_content()...", flush=True)
+            try:
+                relevant = result.get_relevant_content(top_k=25)
+                if relevant:
+                    print(f"    get_relevant_content() returned {len(relevant)} items", flush=True)
+                    for j, item in enumerate(relevant):
+                        try:
+                            if isinstance(item, dict):
+                                content = item.get('content') or item.get('text')
+                                if content and len(str(content)) > 50:
+                                    pages.append({
+                                        'url': item.get('url', f'relevant_{j}'),
+                                        'content': str(content),
+                                        'score': float(item.get('score', 0.5))
+                                    })
+                                    print(f"      ✓ Added from get_relevant_content: {len(str(content))} chars", flush=True)
+                        except Exception as e:
+                            print(f"      Error processing item {j}: {e}", flush=True)
+            except Exception as e:
+                print(f"    get_relevant_content() failed: {e}", flush=True)
+        
+        # Last resort: Log what we couldn't extract
+        if not pages:
+            print(f"\n  ❌ NO PAGES EXTRACTED!", flush=True)
+            if hasattr(result, 'crawled_urls') and result.crawled_urls:
+                print(f"  ℹ️  But {len(result.crawled_urls)} URLs were crawled:", flush=True)
+                for url in result.crawled_urls[:5]:
+                    print(f"      - {url}", flush=True)
+            
+            if hasattr(result, 'documents_with_terms'):
+                dwt = result.documents_with_terms
+                print(f"  ℹ️  Documents with terms: {len(dwt) if dwt else 0}", flush=True)
+            
+            print(f"\n  DEBUGGING INFO:", flush=True)
+            print(f"    Result type: {type(result).__name__}", flush=True)
+            print(f"    Result attributes: {[a for a in dir(result) if not a.startswith('_')][:20]}", flush=True)
+            
+    except Exception as e:
+        print(f"  ❌ EXCEPTION in extract_pages_from_result: {e}", flush=True)
+        import traceback
+        traceback.print_exc()
+    
+    # Final summary
+    if pages:
+        print(f"\n  ✅ Successfully extracted {len(pages)} pages", flush=True)
+        total_chars = sum(len(p.get('content', '')) for p in pages)
+        print(f"     Total content: {total_chars} chars across all pages", flush=True)
+    else:
+        print(f"\n  ⚠️  FINAL RESULT: 0 pages extracted", flush=True)
+    
+    print(f"<<< extract_pages_from_result() returning {len(pages)} pages\n", flush=True)
+    
+    return pages
 
 
 @app.get("/")
@@ -771,18 +920,31 @@ async def run_adaptive_crawl(
         # VERBOSE DEBUG: Log crawl result details
         print(f"\n{'='*40} CRAWL RESULT DEBUG {'='*40}", flush=True)
         print(f"Result type: {type(result)}", flush=True)
-        print(f"Result attributes: {dir(result) if result else 'None'}", flush=True)
+        print(f"Result attributes: {[a for a in dir(result) if not a.startswith('_')]}", flush=True)
+        
         if result:
             if hasattr(result, 'crawled_urls'):
                 print(f"Crawled URLs count: {len(result.crawled_urls)}", flush=True)
+                print(f"Crawled URLs: {result.crawled_urls[:3]}", flush=True)
+            
             if hasattr(result, 'knowledge_base'):
                 kb = result.knowledge_base
                 print(f"Knowledge base type: {type(kb)}", flush=True)
+                print(f"Knowledge base is None: {kb is None}", flush=True)
+                
                 if kb:
-                    if hasattr(kb, 'pages'):
-                        print(f"KB pages count: {len(kb.pages) if kb.pages else 0}", flush=True)
-                    if hasattr(kb, 'documents'):
-                        print(f"KB documents count: {len(kb.documents) if kb.documents else 0}", flush=True)
+                    print(f"KB length: {len(kb) if hasattr(kb, '__len__') else 'N/A'}", flush=True)
+                    if isinstance(kb, list) and kb:
+                        print(f"KB[0] type: {type(kb[0])}", flush=True)
+                        print(f"KB[0] attributes: {[a for a in dir(kb[0]) if not a.startswith('_')][:10]}", flush=True)
+                        print(f"KB[0] content sample: {str(kb[0])[:200]}", flush=True)
+            
+            if hasattr(result, 'documents_with_terms'):
+                print(f"Documents with terms: {len(result.documents_with_terms) if result.documents_with_terms else 0}", flush=True)
+            
+            if hasattr(result, 'term_frequencies'):
+                print(f"Term frequencies: {result.term_frequencies}", flush=True)
+        
         print(f"{'='*40} END DEBUG {'='*40}\n", flush=True)
 
         # FIX: Handle None/empty result
