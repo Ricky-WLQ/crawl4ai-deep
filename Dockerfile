@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 LABEL "language"="python"
 LABEL "framework"="fastapi"
-LABEL "version"="3.6.2"
+LABEL "version"="3.7.0"
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
