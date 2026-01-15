@@ -2,7 +2,7 @@ FROM python:3.11-slim
 
 LABEL "language"="python"
 LABEL "framework"="fastapi"
-LABEL "version"="3.8.0"
+LABEL "version"="3.7.0"
 
 # Set environment variables
 ENV PYTHONDONTWRITEBYTECODE=1
@@ -50,40 +50,39 @@ RUN python -m playwright install chromium && \
     python -m playwright install-deps chromium && \
     rm -rf /tmp/* /var/tmp/*
 
-# Pre-download multilingual embedding model
+# SOLUTION 2: Pre-download multilingual embedding model
 # paraphrase-multilingual-mpnet-base-v2 (~500MB)
 # Supports 50+ languages including Chinese, English, Portuguese
 RUN python << 'EOF'
 import sys
 try:
-    print("Downloading embedding model: paraphrase-multilingual-mpnet-base-v2...", flush=True)
+    print("Downloading SOLUTION 2 model: paraphrase-multilingual-mpnet-base-v2...", flush=True)
     from sentence_transformers import SentenceTransformer
     model = SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2')
-    print("Model downloaded successfully!", flush=True)
-
-    # Verify model works
-    test_embeddings = model.encode(["test", "澳門法律"])
-    print(f"Model verification: Generated {len(test_embeddings)} embeddings", flush=True)
+    print("✓ Model downloaded successfully! Size: ~500MB", flush=True)
+    print("✓ Supports 50+ languages including Chinese, English, Portuguese", flush=True)
 except Exception as e:
-    print(f"Error downloading model: {e}", flush=True)
+    print(f"❌ Error downloading model: {e}", flush=True)
     sys.exit(1)
 EOF
 
 # Clean up cache and temporary files to reduce image size
-RUN rm -rf /tmp/* /var/tmp/* /root/.cache/pip && \
+RUN rm -rf /tmp/* /var/tmp/* /root/.cache/* && \
     find /app -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 
-# Copy application code
+# Copy application code (AFTER dependencies are installed)
 COPY main.py .
 
-# Copy .env.example if it exists (optional)
+# FIX: Copy .env.example using RUN with proper error handling
+# This is optional, so we use shell commands
 RUN if [ -f .env.example ]; then cp .env.example .; fi || true
 
 # Expose port
 EXPOSE 8080
 
-# Health check
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
+# ✅ FIX: Health check with SIMPLE single-line command (no heredoc)
+# Multi-line python << 'EOF' syntax doesn't work in HEALTHCHECK CMD
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
     CMD python -c "import httpx; response = httpx.get('http://localhost:8080/health', timeout=5); exit(0 if response.status_code == 200 else 1)" || exit 1
 
 # Start the application
