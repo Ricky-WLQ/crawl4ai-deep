@@ -651,62 +651,54 @@ async def run_adaptive_crawl(
         else:
             relevant_pages = relevant_pages[:15]
 
-        # Format context for DeepSeek
-        context = format_adaptive_context(relevant_pages)
-
-        if not context.strip():
-            return CrawlResponse(
-                success=False,
-                answer="Pages were crawled but no readable content was extracted.",
-                confidence=confidence,
-                pages_crawled=pages_crawled,
-                sources=[],
-                message="No content extracted",
-                embedding_used=embedding_used
-            )
-
-        print(f"\nContext length: {len(context)} chars", flush=True)
-        print("Generating answer with DeepSeek-reasoner...", flush=True)
-
-        answer = await call_deepseek(
-            query=request.query,
-            context=context,
-            api_key=deepseek_api_key
-        )
-
-        # Prepare sources with deduplication
-        sources = []
-        seen_urls = set()
-        for page in relevant_pages[:15]:
-            url = page.get('url', 'unknown')
-            if url in seen_urls:
-                continue
-            seen_urls.add(url)
-
-            source_info = {
-                "url": url,
-                "relevance": round(page.get('score', 0), 3)
-            }
-            if embedding_used and 'embedding_score' in page:
-                source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)
-            sources.append(source_info)
-
-        crawl_strategy = "embedding" if used_embedding_crawl else "statistical"
-
-        # ✅ FIXED: Changed {confidence:.0%} to {confidence*100:.0f}%
-return CrawlResponse(  
-    success=True,  
-    answer=answer,  
-    confidence=round(confidence, 3),  
-    pages_crawled=pages_crawled,  
-    sources=sources,  
-    message=(  
-        f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence*100:.0f}% confidence" +  
-        (\" (with OpenRouter re-ranking)\" if embedding_used else \"\")  
-    ),  
-    embedding_used=embedding_used or used_embedding_crawl  
-)  
-
+        # Format context for DeepSeek  
+        context = format_adaptive_context(relevant_pages)  
+        if not context.strip():  
+            return CrawlResponse(  
+                success=False,  
+                answer="Pages were crawled but no readable content was extracted.",  
+                confidence=confidence,  
+                pages_crawled=pages_crawled,  
+                sources=[],  
+                message="No content extracted",  
+                embedding_used=embedding_used  
+            )  
+        print(f"\nContext length: {len(context)} chars", flush=True)  
+        print("Generating answer with DeepSeek-reasoner...", flush=True)  
+        answer = await call_deepseek(  
+            query=request.query,  
+            context=context,  
+            api_key=deepseek_api_key  
+        )  
+        # Prepare sources with deduplication  
+        sources = []  
+        seen_urls = set()  
+        for page in relevant_pages[:15]:  
+            url = page.get('url', 'unknown')  
+            if url in seen_urls:  
+                continue  
+            seen_urls.add(url)  
+            source_info = {  
+                "url": url,  
+                "relevance": round(page.get('score', 0), 3)  
+            }  
+            if embedding_used and 'embedding_score' in page:  
+                source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)  
+            sources.append(source_info)  
+        crawl_strategy = "embedding" if used_embedding_crawl else "statistical"  
+        # ✅ FIXED: Changed {confidence:.0%} to {confidence*100:.0f}%  
+        return CrawlResponse(  
+            success=True,  
+            answer=answer,  
+            confidence=round(confidence, 3),  
+            pages_crawled=pages_crawled,  
+            sources=sources,  
+            message=(  
+                f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence*100:.0f}% confidence" +  
+                (" (with OpenRouter re-ranking)" if embedding_used else "")  
+            ),  
+            embedding_used=embedding_used or used_embedding_crawl  
+        )  
 
 
 async def run_fallback_deep_crawl(
