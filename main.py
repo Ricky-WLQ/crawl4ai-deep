@@ -694,18 +694,19 @@ async def run_adaptive_crawl(
         crawl_strategy = "embedding" if used_embedding_crawl else "statistical"
 
         # ✅ FIXED: Changed {confidence:.0%} to {confidence*100:.0f}%
-        return CrawlResponse(
-            success=True,
-            answer=answer,
-            confidence=round(confidence, 3),
-            pages_crawled=pages_crawled,
-            sources=sources,
-            message=(
-                f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence*100:.0f}% confidence" +
-                (" (with OpenRouter re-ranking)" if embedding_used else "")
-            ),
-            embedding_used=embedding_used or used_embedding_crawl
-        )
+return CrawlResponse(  
+    success=True,  
+    answer=answer,  
+    confidence=round(confidence, 3),  
+    pages_crawled=pages_crawled,  
+    sources=sources,  
+    message=(  
+        f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence*100:.0f}% confidence" +  
+        (\" (with OpenRouter re-ranking)\" if embedding_used else \"\")  
+    ),  
+    embedding_used=embedding_used or used_embedding_crawl  
+)  
+
 
 
 async def run_fallback_deep_crawl(
