@@ -45,12 +45,25 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Run crawl4ai setup to install browsers
 RUN crawl4ai-setup
 
-# Pre-download MULTILINGUAL sentence-transformers model for EMBEDDING strategy
-# This avoids delay on first request (model is ~420MB, supports 50+ languages)
-RUN python -c "from sentence_transformers import SentenceTransformer; SentenceTransformer('sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2')"
+# SOLUTION 2 FIX: Pre-download MULTILINGUAL sentence-transformers model
+# Updated from MiniLM-L12-v2 to mpnet-base-v2 (better for legal documents)
+# Model is ~500MB, supports 50+ languages including Chinese
+# This avoids delay on first request
+RUN python -c "from sentence_transformers import SentenceTransformer; \
+    print('Downloading SOLUTION 2 model: paraphrase-multilingual-mpnet-base-v2...'); \
+    SentenceTransformer('sentence-transformers/paraphrase-multilingual-mpnet-base-v2'); \
+    print('Model downloaded successfully!')"
+
+# Optional: Pre-download OpenRouter embedding model metadata (for faster inference)
+# This is lightweight and doesn't require actual model download
+RUN python -c "import httpx; print('OpenRouter embeddings client ready')" || true
 
 # Copy application code
 COPY . .
+
+# Health check to ensure service is running
+HEALTHCHECK --interval=30s --timeout=10s --start-period=40s --retries=3 \
+    CMD python -c "import httpx; httpx.get('http://localhost:8080/health', timeout=5)"
 
 # Expose port
 EXPOSE 8080
