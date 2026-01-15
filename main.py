@@ -1,5 +1,6 @@
 
 
+
 """
 Crawl4AI Adaptive Crawler with LOCAL MULTILINGUAL EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
 
@@ -603,7 +604,9 @@ def extract_pages_from_result(result) -> List[dict]:
                             print(f"    [{i}] Dict with keys: {list(doc.keys())}", flush=True)
                             content = doc.get('content') or doc.get('text') or doc.get('markdown')
                             
-                            if content and len(str(content)) > 50:
+                            if content:
+                                content_str = str(content).strip()
+                                if len(content_str) > 50:
                                 extracted_page = {
                                     'url': doc.get('url', f'doc_{i}'),
                                     'content': str(content),
@@ -920,30 +923,76 @@ async def run_adaptive_crawl(
         # VERBOSE DEBUG: Log crawl result details
         print(f"\n{'='*40} CRAWL RESULT DEBUG {'='*40}", flush=True)
         print(f"Result type: {type(result)}", flush=True)
-        print(f"Result attributes: {[a for a in dir(result) if not a.startswith('_')]}", flush=True)
         
         if result:
+            # Safely handle crawled_urls (it's a set, not a list)
             if hasattr(result, 'crawled_urls'):
-                print(f"Crawled URLs count: {len(result.crawled_urls)}", flush=True)
-                print(f"Crawled URLs: {result.crawled_urls[:3]}", flush=True)
+                print(f"✓ Crawled URLs count: {len(result.crawled_urls)}", flush=True)
+                crawled_urls_list = list(result.crawled_urls)[:5]
+                print(f"  Sample URLs: {crawled_urls_list}", flush=True)
             
+            # Check knowledge_base
             if hasattr(result, 'knowledge_base'):
                 kb = result.knowledge_base
-                print(f"Knowledge base type: {type(kb)}", flush=True)
-                print(f"Knowledge base is None: {kb is None}", flush=True)
+                print(f"✓ Knowledge base exists: {kb is not None}", flush=True)
                 
                 if kb:
-                    print(f"KB length: {len(kb) if hasattr(kb, '__len__') else 'N/A'}", flush=True)
-                    if isinstance(kb, list) and kb:
-                        print(f"KB[0] type: {type(kb[0])}", flush=True)
-                        print(f"KB[0] attributes: {[a for a in dir(kb[0]) if not a.startswith('_')][:10]}", flush=True)
-                        print(f"KB[0] content sample: {str(kb[0])[:200]}", flush=True)
+                    kb_type = type(kb).__name__
+                    kb_len = len(kb) if hasattr(kb, '__len__') else 'unknown'
+                    print(f"  Type: {kb_type}, Length: {kb_len}", flush=True)
+                    
+                    if isinstance(kb, list) and len(kb) > 0:
+                        print(f"  KB[0] type: {type(kb[0]).__name__}", flush=True)
+                        kb_item = kb[0]
+                        
+                        # Inspect first item
+                        if isinstance(kb_item, dict):
+                            print(f"    Dict keys: {list(kb_item.keys())}", flush=True)
+                            for key in ['content', 'text', 'markdown', 'url']:
+                                if key in kb_item:
+                                    val = kb_item[key]
+                                    val_len = len(str(val)) if val else 0
+                                    print(f"      .{key}: {val_len} chars", flush=True)
+                        else:
+                            # It's an object
+                            obj_type = type(kb_item).__name__
+                            print(f"    Object type: {obj_type}", flush=True)
+                            attrs = [a for a in dir(kb_item) if not a.startswith('_')]
+                            print(f"    Attributes: {attrs[:15]}", flush=True)
+                            
+                            # Check for content
+                            for attr in ['content', 'text', 'markdown', 'body']:
+                                if hasattr(kb_item, attr):
+                                    val = getattr(kb_item, attr, None)
+                                    if val:
+                                        val_len = len(str(val))
+                                        print(f"      .{attr}: {val_len} chars", flush=True)
+                else:
+                    print(f"  ⚠️ Knowledge base is EMPTY (None)", flush=True)
             
-            if hasattr(result, 'documents_with_terms'):
-                print(f"Documents with terms: {len(result.documents_with_terms) if result.documents_with_terms else 0}", flush=True)
-            
+            # Check term extraction
             if hasattr(result, 'term_frequencies'):
-                print(f"Term frequencies: {result.term_frequencies}", flush=True)
+                tf = result.term_frequencies
+                if tf:
+                    print(f"✓ Term frequencies: {len(tf)} terms found", flush=True)
+                    top_terms = sorted(tf.items(), key=lambda x: x[1], reverse=True)[:5]
+                    print(f"  Top terms: {top_terms}", flush=True)
+                else:
+                    print(f"⚠️ Term frequencies: EMPTY (0 terms)", flush=True)
+            
+            # Check documents with terms
+            if hasattr(result, 'documents_with_terms'):
+                dwt = result.documents_with_terms
+                if dwt:
+                    print(f"✓ Documents with terms: {len(dwt)} documents", flush=True)
+                else:
+                    print(f"⚠️ Documents with terms: EMPTY", flush=True)
+            
+            # Check metrics
+            if hasattr(result, 'metrics'):
+                metrics = result.metrics
+                if metrics:
+                    print(f"✓ Metrics: {metrics}", flush=True)
         
         print(f"{'='*40} END DEBUG {'='*40}\n", flush=True)
 
@@ -962,7 +1011,7 @@ async def run_adaptive_crawl(
         # Get crawl statistics
         confidence = adaptive.confidence if hasattr(adaptive, 'confidence') else 0.0
         crawled_urls = result.crawled_urls if hasattr(result, 'crawled_urls') else []
-        pages_crawled = len(crawled_urls)
+        pages_crawled = len(crawled_urls)  # ✅ This works because len() works on sets too
 
         print(f"Crawl complete: {pages_crawled} pages, {confidence:.0%} confidence", flush=True)
 
