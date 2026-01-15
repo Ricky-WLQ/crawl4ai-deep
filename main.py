@@ -17,7 +17,7 @@ RE-RANKING (optional, requires OPENROUTER_API_KEY):
 ANSWER GENERATION (requires DEEPSEEK_API_KEY):
 - DeepSeek-reasoner for comprehensive answers
 
-Version: 3.6.2 (FINAL - All Issues Fixed including asyncio import)
+Version: 3.6.3 (FINAL - All Issues Fixed - Force Rebuild)  
 """
 
 import os
