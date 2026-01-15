@@ -2,11 +2,26 @@
 """
 Crawl4AI Adaptive Crawler with LOCAL MULTILINGUAL EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
 
+VERSION 3.7.0 - SPA/JavaScript FIX
+
+ROOT CAUSE FIXES (identified via Context7 documentation):
+1. SPAFriendlyCrawler wrapper - AdaptiveCrawler doesn't accept CrawlerRunConfig,
+   so SPA/JavaScript sites weren't rendering. The wrapper intercepts arun() calls
+   and automatically injects CrawlerRunConfig with wait_for, process_iframes, etc.
+2. Embedding model verification at startup - detects model loading failures early
+3. Verbose logging for debugging - helps trace content extraction issues
+
 EMBEDDING STRATEGY (Semantic Crawling - NO API NEEDED!):
 - Uses LOCAL sentence-transformers/paraphrase-multilingual-mpnet-base-v2
 - Supports 50+ languages including Chinese, English, and more
 - AGGRESSIVE EXPLORATION: confidence_threshold=0.05, min_relative_improvement=0.01
 - Disables early stopping to ensure thorough crawling
+
+SPA/JavaScript Support (NEW in v3.7.0):
+- wait_for="css:body" ensures JavaScript content renders before extraction
+- process_iframes=True includes iframe content
+- delay_before_return_html=2.0s extra delay for JS execution
+- page_timeout=60000ms longer timeout for slow sites
 
 FALLBACK (if use_embeddings=false):
 - Uses BM25 statistical strategy (keyword-based)
@@ -17,13 +32,12 @@ RE-RANKING (optional, requires OPENROUTER_API_KEY):
 ANSWER GENERATION (requires DEEPSEEK_API_KEY):
 - DeepSeek-reasoner for comprehensive answers
 
-Version: 3.6.3 (FINAL - All Issues Fixed - Force Rebuild)  
+Version: 3.7.0 (SPA FIX - Context7 Verified)
 """
 
 import os
 import sys
-import time
-import asyncio  # ✅ CRITICAL FIX: Added asyncio import
+import asyncio
 import numpy as np
 from contextlib import asynccontextmanager
 from typing import Optional, List
@@ -36,10 +50,152 @@ from pydantic import BaseModel
 # Core crawl4ai imports
 try:
     from crawl4ai import AsyncWebCrawler, BrowserConfig, CrawlerRunConfig
+    from crawl4ai.async_configs import CacheMode
     print("Core crawl4ai imported successfully", flush=True)
 except ImportError as e:
     print(f"Failed to import core crawl4ai: {e}", flush=True)
     sys.exit(1)
+
+
+# ============================================================================
+# FIX: AsyncWebCrawler Wrapper for SPA/JavaScript Sites
+# ============================================================================
+# ROOT CAUSE: AdaptiveCrawler doesn't accept CrawlerRunConfig, so it can't
+# pass wait_for, process_iframes, or wait_until to handle SPA sites.
+# SOLUTION: Wrap AsyncWebCrawler to automatically inject CrawlerRunConfig
+# with SPA-friendly settings on every arun() call.
+# ============================================================================
+
+class SPAFriendlyCrawler:
+    """
+    Wrapper around AsyncWebCrawler that automatically adds SPA-friendly settings.
+
+    This solves the issue where AdaptiveCrawler can't pass CrawlerRunConfig
+    because it calls crawler.arun() internally without config parameter.
+
+    Settings applied:
+    - wait_for: Wait for body content to render
+    - process_iframes: Include iframe content
+    - delay_before_return_html: Extra delay for JS to execute
+    - page_timeout: Longer timeout for slow sites
+    """
+
+    def __init__(self, crawler: AsyncWebCrawler, default_config: CrawlerRunConfig = None):
+        self._crawler = crawler
+        self._default_config = default_config or CrawlerRunConfig(
+            # Wait for JavaScript content to render
+            wait_for="css:body",
+            # Include iframe content (important for embedded content)
+            process_iframes=True,
+            # Extra delay for JavaScript execution
+            delay_before_return_html=2.0,
+            # Longer timeout for slow sites
+            page_timeout=60000,
+            # Bypass cache to get fresh content
+            cache_mode=CacheMode.BYPASS,
+            # Be verbose for debugging
+            verbose=True
+        )
+        print(f"SPAFriendlyCrawler initialized with SPA-friendly defaults", flush=True)
+        print(f"  - wait_for: {self._default_config.wait_for}", flush=True)
+        print(f"  - process_iframes: {self._default_config.process_iframes}", flush=True)
+        print(f"  - delay_before_return_html: {self._default_config.delay_before_return_html}s", flush=True)
+
+    async def arun(self, url: str, config: CrawlerRunConfig = None, **kwargs):
+        """
+        Intercept arun() calls and inject SPA-friendly config.
+
+        If AdaptiveCrawler calls arun() without config, we use our default.
+        If a config is provided, we could merge settings (for now we use provided).
+        """
+        # Use provided config or fall back to our SPA-friendly defaults
+        effective_config = config if config is not None else self._default_config
+
+        print(f"SPAFriendlyCrawler.arun() called for: {url[:80]}...", flush=True)
+        print(f"  Using config with wait_for={effective_config.wait_for}", flush=True)
+
+        return await self._crawler.arun(url=url, config=effective_config, **kwargs)
+
+    # Delegate all other methods/attributes to the underlying crawler
+    def __getattr__(self, name):
+        return getattr(self._crawler, name)
+
+    async def __aenter__(self):
+        await self._crawler.__aenter__()
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        return await self._crawler.__aexit__(exc_type, exc_val, exc_tb)
+
+
+# ============================================================================
+# FIX: Embedding Model Verification at Startup
+# ============================================================================
+# ROOT CAUSE: The embedding model might fail silently, causing 0 terms extraction.
+# SOLUTION: Verify the model loads and generates embeddings at startup.
+# ============================================================================
+
+EMBEDDING_MODEL_VERIFIED = False
+EMBEDDING_MODEL_ERROR = None
+
+def verify_embedding_model(model_name: str = "sentence-transformers/paraphrase-multilingual-mpnet-base-v2") -> bool:
+    """
+    Verify that the embedding model can be loaded and generates valid embeddings.
+
+    This runs at startup to catch model loading issues early.
+    """
+    global EMBEDDING_MODEL_VERIFIED, EMBEDDING_MODEL_ERROR
+
+    try:
+        print(f"Verifying embedding model: {model_name}...", flush=True)
+
+        # Try to import sentence-transformers
+        from sentence_transformers import SentenceTransformer
+
+        # Load the model
+        model = SentenceTransformer(model_name)
+        print(f"  ✓ Model loaded successfully", flush=True)
+
+        # Test with sample texts (include Chinese for multilingual verification)
+        test_texts = [
+            "This is a test sentence in English.",
+            "这是一个中文测试句子。",  # Chinese test
+            "澳門法律 刑事 販毒"  # Macau law terms
+        ]
+
+        # Generate embeddings
+        embeddings = model.encode(test_texts)
+        print(f"  ✓ Generated {len(embeddings)} embeddings", flush=True)
+        print(f"  ✓ Embedding dimension: {len(embeddings[0])}", flush=True)
+
+        # Verify embeddings are not zero vectors
+        import numpy as np
+        for i, (text, emb) in enumerate(zip(test_texts, embeddings)):
+            norm = np.linalg.norm(emb)
+            if norm < 0.001:
+                raise ValueError(f"Embedding for '{text[:30]}...' has near-zero norm: {norm}")
+            print(f"  ✓ Text {i+1} embedding norm: {norm:.4f}", flush=True)
+
+        # Test similarity between Chinese texts
+        from sklearn.metrics.pairwise import cosine_similarity
+        sim = cosine_similarity([embeddings[1]], [embeddings[2]])[0][0]
+        print(f"  ✓ Chinese text similarity test: {sim:.4f}", flush=True)
+
+        EMBEDDING_MODEL_VERIFIED = True
+        print(f"✅ Embedding model verification PASSED", flush=True)
+        return True
+
+    except ImportError as e:
+        EMBEDDING_MODEL_ERROR = f"sentence-transformers not installed: {e}"
+        print(f"❌ Embedding model verification FAILED: {EMBEDDING_MODEL_ERROR}", flush=True)
+        return False
+    except Exception as e:
+        EMBEDDING_MODEL_ERROR = str(e)
+        print(f"❌ Embedding model verification FAILED: {EMBEDDING_MODEL_ERROR}", flush=True)
+        import traceback
+        traceback.print_exc()
+        return False
+
 
 # Adaptive crawler imports
 try:
@@ -233,19 +389,39 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler."""
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     print("=" * 60, flush=True)
-    print("Crawl4AI Adaptive Crawler v3.6.2 (FINAL) Starting...", flush=True)
+    print("Crawl4AI Adaptive Crawler v3.7.0 (SPA FIX) Starting...", flush=True)
     print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
     print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
     print(f"OpenRouter API Key: {'Configured' if openrouter_configured else 'NOT SET'}", flush=True)
     print("=" * 60, flush=True)
+
+    # FIX: Verify embedding model at startup
+    print("STARTUP VERIFICATION:", flush=True)
+    embedding_ok = verify_embedding_model()
+    if not embedding_ok:
+        print(f"⚠️  WARNING: Embedding model verification failed!", flush=True)
+        print(f"   Error: {EMBEDDING_MODEL_ERROR}", flush=True)
+        print(f"   The embedding strategy may not work correctly.", flush=True)
+    print("=" * 60, flush=True)
+
+    print("FIXES APPLIED (v3.7.0):", flush=True)
+    print("  ✓ FIX 1: SPAFriendlyCrawler wrapper for JavaScript sites", flush=True)
+    print("    - Automatically injects CrawlerRunConfig to AdaptiveCrawler", flush=True)
+    print("    - wait_for='css:body' ensures content renders", flush=True)
+    print("    - process_iframes=True includes embedded content", flush=True)
+    print("    - delay_before_return_html=2.0s for JS execution", flush=True)
+    print("  ✓ FIX 2: Embedding model verification at startup", flush=True)
+    print("  ✓ FIX 3: Verbose logging for debugging", flush=True)
+    print("=" * 60, flush=True)
+
     print("EMBEDDING Strategy (LOCAL MULTILINGUAL - No API needed!):", flush=True)
     print("  ✓ Model: paraphrase-multilingual-mpnet-base-v2 (50+ languages)", flush=True)
-    print("  ✓ SOLUTION 2: Upgraded from MiniLM to mpnet for better legal docs", flush=True)
-    print("  ✓ SOLUTION 1: AGGRESSIVE exploration (confidence=0.05, min_improvement=0.01)", flush=True)
-    print("  ✓ SOLUTION 4: Query variations=20 (up from 5)", flush=True)
-    print("  ✓ SOLUTION 5: max_pages=50, top_k_links=25 (deeper crawling)", flush=True)
+    print(f"  ✓ Model Verified: {'YES' if EMBEDDING_MODEL_VERIFIED else 'NO'}", flush=True)
+    print("  ✓ AGGRESSIVE exploration (confidence=0.05, min_improvement=0.01)", flush=True)
+    print("  ✓ Query variations=20 for comprehensive coverage", flush=True)
+    print("  ✓ max_pages=50, top_k_links=25 (deeper crawling)", flush=True)
     if openrouter_configured:
-        print("  ✓ SOLUTION 3: Re-ranking 75% semantic + 25% BM25", flush=True)
+        print("  ✓ Re-ranking 75% semantic + 25% BM25", flush=True)
         print("  ✓ Re-ranking: OpenRouter qwen3-embedding-8b with retry logic", flush=True)
     print("  ✓ Answer Generation: DeepSeek-reasoner", flush=True)
     print("=" * 60, flush=True)
@@ -255,8 +431,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
-    description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + OpenRouter re-ranking + DeepSeek reasoning - v3.6.2 FINAL",
-    version="3.6.2",
+    description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + SPA/JavaScript support + OpenRouter re-ranking + DeepSeek reasoning - v3.7.0 SPA FIX",
+    version="3.7.0",
     lifespan=lifespan
 )
 
@@ -417,28 +593,33 @@ async def root():
     """Service status endpoint."""
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     return {
-        "message": "Crawl4AI Adaptive Crawler v3.6.2 (FINAL) is running!",
-        "version": "3.6.2",
+        "message": "Crawl4AI Adaptive Crawler v3.7.0 (SPA FIX) is running!",
+        "version": "3.7.0",
         "status": "✅ Ready",
         "adaptive_available": ADAPTIVE_AVAILABLE,
         "deep_crawl_fallback": DEEP_CRAWL_AVAILABLE,
         "openrouter_reranking": openrouter_configured,
-        "solutions_applied": [
-            "✓ SOLUTION 1: Aggressive stopping prevention",
-            "✓ SOLUTION 2: Better embedding model (mpnet)",
-            "✓ SOLUTION 3: Better re-ranking weights (75/25)",
-            "✓ SOLUTION 4: More query variations (20)",
-            "✓ SOLUTION 5: Deeper crawling (50 pages, 25 links)",
-            "✓ SOLUTION 6: Proper markdown extraction",
-            "✓ SYNTAX FIX: Wrapped message expressions",
-            "✓ FIX 1: Added result extraction fallback",
-            "✓ FIX 2: Added retry logic for API calls",
-            "✓ FIX 3: Added error handling for None results",
-            "✓ FIX 4: Removed unused imports",
-            "✓ FIX 5: ✅ Added asyncio import"
+        "embedding_model_verified": EMBEDDING_MODEL_VERIFIED,
+        "fixes_v3.7.0": [
+            "✓ FIX: SPAFriendlyCrawler wrapper for JavaScript/SPA sites",
+            "✓ FIX: Automatic CrawlerRunConfig injection to AdaptiveCrawler",
+            "✓ FIX: wait_for='css:body' ensures content renders",
+            "✓ FIX: process_iframes=True includes embedded content",
+            "✓ FIX: delay_before_return_html=2.0s for JS execution",
+            "✓ FIX: Embedding model verification at startup",
+            "✓ FIX: Verbose logging for debugging"
+        ],
+        "previous_solutions": [
+            "✓ Aggressive stopping prevention (confidence=0.05)",
+            "✓ Better embedding model (mpnet multilingual)",
+            "✓ Better re-ranking weights (75/25)",
+            "✓ More query variations (20)",
+            "✓ Deeper crawling (50 pages, 25 links)",
+            "✓ Retry logic for API calls"
         ],
         "features": [
             "LOCAL multilingual embedding strategy",
+            "SPA/JavaScript site support via SPAFriendlyCrawler",
             "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
             "OpenRouter qwen3-embedding-8b (optional)",
             "Retry logic with exponential backoff",
@@ -568,17 +749,41 @@ async def run_adaptive_crawl(
 
     browser_config = BrowserConfig(
         headless=True,
-        verbose=False,
+        verbose=True,  # Enable verbose for debugging
+        java_script_enabled=True,  # Ensure JS is enabled for SPA sites
     )
 
-    async with AsyncWebCrawler(config=browser_config) as crawler:
+    # FIX: Use SPAFriendlyCrawler wrapper to automatically inject CrawlerRunConfig
+    # This solves the root cause: AdaptiveCrawler doesn't accept CrawlerRunConfig,
+    # so SPA sites (like macaolaws.zeabur.app) don't render properly.
+    async with AsyncWebCrawler(config=browser_config) as raw_crawler:
+        # Wrap the crawler with SPA-friendly defaults
+        crawler = SPAFriendlyCrawler(raw_crawler)
         adaptive = AdaptiveCrawler(crawler, config=config)
 
         print("Starting adaptive crawl with AGGRESSIVE EXPLORATION...", flush=True)
+        print(f"  SPAFriendlyCrawler will inject: wait_for, process_iframes, delay", flush=True)
         result = await adaptive.digest(
             start_url=request.start_url,
             query=request.query
         )
+
+        # VERBOSE DEBUG: Log crawl result details
+        print(f"\n{'='*40} CRAWL RESULT DEBUG {'='*40}", flush=True)
+        print(f"Result type: {type(result)}", flush=True)
+        print(f"Result attributes: {dir(result) if result else 'None'}", flush=True)
+        if result:
+            if hasattr(result, 'crawled_urls'):
+                print(f"Crawled URLs count: {len(result.crawled_urls)}", flush=True)
+            if hasattr(result, 'knowledge_base'):
+                kb = result.knowledge_base
+                print(f"Knowledge base type: {type(kb)}", flush=True)
+                if kb:
+                    if hasattr(kb, 'pages'):
+                        print(f"KB pages count: {len(kb.pages) if kb.pages else 0}", flush=True)
+                    if hasattr(kb, 'documents'):
+                        print(f"KB documents count: {len(kb.documents) if kb.documents else 0}", flush=True)
+        print(f"{'='*40} END DEBUG {'='*40}\n", flush=True)
 
         # FIX: Handle None/empty result
         if not result:
