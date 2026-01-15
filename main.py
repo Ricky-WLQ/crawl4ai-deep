@@ -119,7 +119,10 @@ DEEPSEEK_TIMEOUT_SECONDS = 60
 OPENROUTER_TIMEOUT_SECONDS = 30
 MAX_REQUEST_SIZE = 100_000  # 100KB max context
 MAX_CONCURRENT_REQUESTS = 3
-MEMORY_THRESHOLD_MB = 500
+# FIXED: Read from environment, with sensible default for loaded models
+# The application loads ~1.5-2GB at startup (PyTorch, sentence-transformers, Chromium)
+# Default 2000MB allows crawling headroom; adjust via MEMORY_THRESHOLD_MB env var
+MEMORY_THRESHOLD_MB = int(os.environ.get("MEMORY_THRESHOLD_MB", "2000"))
 
 # Retry Configuration
 MAX_RETRIES = 3
