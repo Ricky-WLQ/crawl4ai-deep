@@ -16,11 +16,12 @@ RE-RANKING (optional, requires OPENROUTER_API_KEY):
 ANSWER GENERATION (requires DEEPSEEK_API_KEY):
 - DeepSeek-reasoner for comprehensive answers
 
-Version: 3.6.0 (FIXED - All 6 Solutions Applied)
+Version: 3.6.1 (FIXED - All Issues Resolved)
 """
 
 import os
 import sys
+import time
 import numpy as np
 from contextlib import asynccontextmanager
 from typing import Optional, List
@@ -40,22 +41,12 @@ except ImportError as e:
 
 # Adaptive crawler imports
 try:
-    from crawl4ai import AdaptiveCrawler, AdaptiveConfig, LLMConfig
+    from crawl4ai import AdaptiveCrawler, AdaptiveConfig
     ADAPTIVE_AVAILABLE = True
     print("AdaptiveCrawler imported successfully", flush=True)
 except ImportError as e:
     print(f"AdaptiveCrawler not available: {e}", flush=True)
     ADAPTIVE_AVAILABLE = False
-
-# Check if LLMConfig is available (for native embedding strategy)
-LLMCONFIG_AVAILABLE = 'LLMConfig' in dir()
-if not LLMCONFIG_AVAILABLE:
-    try:
-        from crawl4ai import LLMConfig
-        LLMCONFIG_AVAILABLE = True
-    except ImportError:
-        print("LLMConfig not available, will use fallback embedding", flush=True)
-        LLMCONFIG_AVAILABLE = False
 
 # Fallback: Deep crawling imports (if adaptive not available)
 try:
@@ -70,50 +61,72 @@ except ImportError as e:
 
 
 # ============================================================================
-# Custom OpenRouter Embedding Client
+# Custom OpenRouter Embedding Client with Retry Logic
 # ============================================================================
 
 class OpenRouterEmbeddings:
-    """Custom client for OpenRouter embeddings API."""
+    """Custom client for OpenRouter embeddings API with retry logic."""
 
-    def __init__(self, api_key: str, model: str = "qwen/qwen3-embedding-8b"):
+    def __init__(self, api_key: str, model: str = "qwen/qwen3-embedding-8b", max_retries: int = 3):
         self.api_key = api_key
         self.model = model
         self.base_url = "https://openrouter.ai/api/v1/embeddings"
+        self.max_retries = max_retries
 
     async def get_embeddings(self, texts: List[str]) -> List[List[float]]:
-        """Get embeddings for a list of texts from OpenRouter."""
+        """Get embeddings for a list of texts from OpenRouter with retry logic."""
         if not texts:
             return []
 
-        async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.post(
-                self.base_url,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json"
-                },
-                json={
-                    "model": self.model,
-                    "input": texts
-                }
-            )
+        for attempt in range(self.max_retries):
+            try:
+                async with httpx.AsyncClient(timeout=60.0) as client:
+                    response = await client.post(
+                        self.base_url,
+                        headers={
+                            "Authorization": f"Bearer {self.api_key}",
+                            "Content-Type": "application/json"
+                        },
+                        json={
+                            "model": self.model,
+                            "input": texts
+                        }
+                    )
 
-            if response.status_code != 200:
-                print(f"OpenRouter embedding error: {response.status_code} - {response.text}", flush=True)
-                raise HTTPException(
-                    status_code=response.status_code,
-                    detail=f"OpenRouter embedding error: {response.text}"
-                )
+                    if response.status_code == 429:  # Rate limited
+                        wait_time = 2 ** attempt  # Exponential backoff
+                        print(f"Rate limited. Waiting {wait_time}s before retry...", flush=True)
+                        await asyncio.sleep(wait_time)
+                        continue
 
-            result = response.json()
-            # Extract embeddings in order
-            embeddings = [None] * len(texts)
-            for item in result.get("data", []):
-                idx = item.get("index", 0)
-                embeddings[idx] = item.get("embedding", [])
+                    if response.status_code != 200:
+                        print(f"OpenRouter embedding error: {response.status_code} - {response.text}", flush=True)
+                        if attempt == self.max_retries - 1:
+                            raise HTTPException(
+                                status_code=response.status_code,
+                                detail=f"OpenRouter embedding error: {response.text}"
+                            )
+                        continue
 
-            return embeddings
+                    result = response.json()
+                    # Extract embeddings in order
+                    embeddings = [None] * len(texts)
+                    for item in result.get("data", []):
+                        idx = item.get("index", 0)
+                        embeddings[idx] = item.get("embedding", [])
+
+                    return embeddings
+
+            except httpx.TimeoutException:
+                if attempt == self.max_retries - 1:
+                    print(f"Timeout after {self.max_retries} attempts", flush=True)
+                    raise
+                wait_time = 2 ** attempt
+                print(f"Timeout. Waiting {wait_time}s before retry...", flush=True)
+                await asyncio.sleep(wait_time)
+                continue
+
+        return []
 
     async def get_embedding(self, text: str) -> List[float]:
         """Get embedding for a single text."""
@@ -126,17 +139,21 @@ def cosine_similarity(vec1: List[float], vec2: List[float]) -> float:
     if not vec1 or not vec2:
         return 0.0
 
-    a = np.array(vec1)
-    b = np.array(vec2)
+    try:
+        a = np.array(vec1)
+        b = np.array(vec2)
 
-    dot_product = np.dot(a, b)
-    norm_a = np.linalg.norm(a)
-    norm_b = np.linalg.norm(b)
+        dot_product = np.dot(a, b)
+        norm_a = np.linalg.norm(a)
+        norm_b = np.linalg.norm(b)
 
-    if norm_a == 0 or norm_b == 0:
+        if norm_a == 0 or norm_b == 0:
+            return 0.0
+
+        return float(dot_product / (norm_a * norm_b))
+    except Exception as e:
+        print(f"Error calculating cosine similarity: {e}", flush=True)
         return 0.0
-
-    return float(dot_product / (norm_a * norm_b))
 
 
 async def rerank_by_embeddings(
@@ -214,7 +231,7 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler."""
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     print("=" * 60, flush=True)
-    print("Crawl4AI Adaptive Crawler v3.6.0 (FIXED) Starting...", flush=True)
+    print("Crawl4AI Adaptive Crawler v3.6.1 (FIXED) Starting...", flush=True)
     print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
     print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
     print(f"OpenRouter API Key: {'Configured' if openrouter_configured else 'NOT SET'}", flush=True)
@@ -227,7 +244,7 @@ async def lifespan(app: FastAPI):
     print("  ✓ SOLUTION 5: max_pages=50, top_k_links=25 (deeper crawling)", flush=True)
     if openrouter_configured:
         print("  ✓ SOLUTION 3: Re-ranking 75% semantic + 25% BM25", flush=True)
-        print("  ✓ Re-ranking: OpenRouter qwen3-embedding-8b", flush=True)
+        print("  ✓ Re-ranking: OpenRouter qwen3-embedding-8b with retry logic", flush=True)
     print("  ✓ Answer Generation: DeepSeek-reasoner", flush=True)
     print("=" * 60, flush=True)
     yield
@@ -236,8 +253,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
-    description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + OpenRouter re-ranking + DeepSeek reasoning - v3.6.0 FIXED",
-    version="3.6.0",
+    description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + OpenRouter re-ranking + DeepSeek reasoning - v3.6.1 FIXED",
+    version="3.6.1",
     lifespan=lifespan
 )
 
@@ -246,8 +263,8 @@ class CrawlRequest(BaseModel):
     """Request model for adaptive crawling."""
     start_url: str
     query: str
-    max_pages: Optional[int] = 50  # SOLUTION 5: Increased from 20
-    confidence_threshold: Optional[float] = 0.05  # SOLUTION 1: Lowered from 0.7
+    max_pages: Optional[int] = 50
+    confidence_threshold: Optional[float] = 0.05
     use_embeddings: Optional[bool] = True
     embedding_model: Optional[str] = "qwen/qwen3-embedding-8b"
 
@@ -267,9 +284,10 @@ async def call_deepseek(
     query: str,
     context: str,
     api_key: str,
-    max_tokens: int = 3000
+    max_tokens: int = 3000,
+    max_retries: int = 3
 ) -> str:
-    """Call DeepSeek API to generate an answer."""
+    """Call DeepSeek API to generate an answer with retry logic."""
 
     system_prompt = """You are a helpful assistant that provides direct, accurate answers based on the provided web content.
 
@@ -290,32 +308,51 @@ Crawled Web Content:
 
 Based on the above content, provide a detailed and accurate answer to the query."""
 
-    async with httpx.AsyncClient(timeout=180.0) as client:
-        response = await client.post(
-            "https://api.deepseek.com/v1/chat/completions",
-            headers={
-                "Authorization": f"Bearer {api_key}",
-                "Content-Type": "application/json"
-            },
-            json={
-                "model": "deepseek-reasoner",
-                "messages": [
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                "max_tokens": max_tokens,
-                "temperature": 0.2
-            }
-        )
+    for attempt in range(max_retries):
+        try:
+            async with httpx.AsyncClient(timeout=180.0) as client:
+                response = await client.post(
+                    "https://api.deepseek.com/v1/chat/completions",
+                    headers={
+                        "Authorization": f"Bearer {api_key}",
+                        "Content-Type": "application/json"
+                    },
+                    json={
+                        "model": "deepseek-reasoner",
+                        "messages": [
+                            {"role": "system", "content": system_prompt},
+                            {"role": "user", "content": user_message}
+                        ],
+                        "max_tokens": max_tokens,
+                        "temperature": 0.2
+                    }
+                )
 
-        if response.status_code != 200:
-            raise HTTPException(
-                status_code=response.status_code,
-                detail=f"DeepSeek API error: {response.text}"
-            )
+                if response.status_code == 429:  # Rate limited
+                    wait_time = 2 ** attempt
+                    print(f"DeepSeek rate limited. Waiting {wait_time}s...", flush=True)
+                    await asyncio.sleep(wait_time)
+                    continue
 
-        result = response.json()
-        return result["choices"][0]["message"]["content"]
+                if response.status_code != 200:
+                    if attempt == max_retries - 1:
+                        raise HTTPException(
+                            status_code=response.status_code,
+                            detail=f"DeepSeek API error: {response.text}"
+                        )
+                    continue
+
+                result = response.json()
+                return result["choices"][0]["message"]["content"]
+
+        except httpx.TimeoutException:
+            if attempt == max_retries - 1:
+                raise HTTPException(status_code=504, detail="DeepSeek API timeout")
+            wait_time = 2 ** attempt
+            print(f"DeepSeek timeout. Retrying in {wait_time}s...", flush=True)
+            await asyncio.sleep(wait_time)
+
+    raise HTTPException(status_code=500, detail="Failed to get response from DeepSeek after retries")
 
 
 def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) -> str:
@@ -355,28 +392,52 @@ def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) 
     return "\n".join(context_parts)
 
 
+def extract_pages_from_result(result) -> List[dict]:
+    """FIX: Extract pages from adaptive crawl result with fallback handling."""
+    pages = []
+    
+    try:
+        # Try multiple ways to extract pages
+        if hasattr(result, 'pages') and result.pages:
+            pages = result.pages
+        elif hasattr(result, 'get_relevant_content'):
+            pages = result.get_relevant_content(top_k=25)
+        elif hasattr(result, 'knowledge_base') and hasattr(result.knowledge_base, 'pages'):
+            pages = result.knowledge_base.pages
+    except Exception as e:
+        print(f"Error extracting pages: {e}", flush=True)
+    
+    return pages if pages else []
+
+
 @app.get("/")
 async def root():
     """Service status endpoint."""
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     return {
-        "message": "Crawl4AI Adaptive Crawler v3.6.0 (FIXED) is running!",
-        "version": "3.6.0",
+        "message": "Crawl4AI Adaptive Crawler v3.6.1 (FIXED) is running!",
+        "version": "3.6.1",
         "adaptive_available": ADAPTIVE_AVAILABLE,
         "deep_crawl_fallback": DEEP_CRAWL_AVAILABLE,
         "openrouter_reranking": openrouter_configured,
         "solutions_applied": [
-            "✓ SOLUTION 1: Aggressive stopping prevention (confidence=0.05, min_improvement=0.01)",
-            "✓ SOLUTION 2: Better embedding model (mpnet vs MiniLM)",
-            "✓ SOLUTION 3: Better re-ranking weights (75% semantic / 25% BM25)",
-            "✓ SOLUTION 4: More query variations (20 instead of 5)",
-            "✓ SOLUTION 5: Deeper crawling (max_pages=50, top_k_links=25)",
-            "✓ SOLUTION 6: Proper markdown extraction"
+            "✓ SOLUTION 1: Aggressive stopping prevention",
+            "✓ SOLUTION 2: Better embedding model (mpnet)",
+            "✓ SOLUTION 3: Better re-ranking weights (75/25)",
+            "✓ SOLUTION 4: More query variations (20)",
+            "✓ SOLUTION 5: Deeper crawling (50 pages, 25 links)",
+            "✓ SOLUTION 6: Proper markdown extraction",
+            "✓ SYNTAX FIX: Wrapped message expressions",
+            "✓ FIX 1: Added result extraction fallback",
+            "✓ FIX 2: Added retry logic for API calls",
+            "✓ FIX 3: Added error handling for None results",
+            "✓ FIX 4: Removed unused imports"
         ],
         "features": [
-            "LOCAL multilingual embedding strategy (no API needed for crawling)",
-            "sentence-transformers/paraphrase-multilingual-mpnet-base-v2 (50+ languages)",
-            "OpenRouter qwen3-embedding-8b for re-ranking (optional)",
+            "LOCAL multilingual embedding strategy",
+            "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+            "OpenRouter qwen3-embedding-8b (optional)",
+            "Retry logic with exponential backoff",
             "Aggressive exploration prevents early termination",
             "DeepSeek-reasoner for answer generation"
         ]
@@ -391,16 +452,7 @@ async def health():
 
 @app.post("/crawl", response_model=CrawlResponse)
 async def adaptive_crawl(request: CrawlRequest):
-    """
-    Perform adaptive crawling and return a direct answer.
-
-    - Uses AdaptiveCrawler with EMBEDDING strategy for semantic link selection
-    - Better embedding model (mpnet-base) for improved legal document understanding
-    - Aggressive exploration parameters to prevent early stopping
-    - OpenRouter embeddings (qwen3-embedding-8b) for crawling and re-ranking
-    - Increased link exploration to discover more relevant content
-    - DeepSeek-reasoner generates comprehensive answer
-    """
+    """Perform adaptive crawling and return a direct answer."""
 
     # Check for required API keys
     deepseek_api_key = os.environ.get("DEEPSEEK_API_KEY")
@@ -445,8 +497,7 @@ async def adaptive_crawl(request: CrawlRequest):
                 request=request,
                 deepseek_api_key=deepseek_api_key,
                 embedding_client=embedding_client,
-                domain=domain,
-                openrouter_api_key=openrouter_api_key
+                domain=domain
             )
         elif DEEP_CRAWL_AVAILABLE:
             return await run_fallback_deep_crawl(
@@ -474,68 +525,43 @@ async def run_adaptive_crawl(
     request: CrawlRequest,
     deepseek_api_key: str,
     embedding_client: Optional[OpenRouterEmbeddings],
-    domain: str,
-    openrouter_api_key: Optional[str] = None
+    domain: str
 ) -> CrawlResponse:
-    """Run crawl using AdaptiveCrawler with LOCAL EMBEDDING strategy + OpenRouter re-ranking.
-
-    SOLUTIONS APPLIED:
-    - SOLUTION 1: Aggressive stopping prevention (confidence_threshold=0.05, min_relative_improvement=0.01)
-    - SOLUTION 2: Better embedding model (paraphrase-multilingual-mpnet-base-v2)
-    - SOLUTION 4: More query variations (n_query_variations=20)
-    - SOLUTION 5: Deeper crawling (max_pages=50, top_k_links=25)
-    - SOLUTION 6: Proper markdown extraction for .asp files
-    """
+    """Run crawl using AdaptiveCrawler with LOCAL EMBEDDING strategy + OpenRouter re-ranking."""
 
     if request.use_embeddings:
-        # Use EMBEDDING strategy with LOCAL sentence-transformers
-        # No API key needed for embeddings - runs locally on server!
         print("Using EMBEDDING strategy for semantic link selection", flush=True)
-        print("  ✓ SOLUTION 2: Model: paraphrase-multilingual-mpnet-base-v2 (50+ languages)", flush=True)
-        print("  ✓ SOLUTION 1: Aggressive exploration: confidence_threshold=0.05, min_relative_improvement=0.01", flush=True)
+        print("  ✓ SOLUTION 2: Model: paraphrase-multilingual-mpnet-base-v2", flush=True)
+        print("  ✓ SOLUTION 1: Aggressive exploration: confidence_threshold=0.05", flush=True)
         print("  ✓ SOLUTION 4: Query variations: 20", flush=True)
         print("  ✓ SOLUTION 5: max_pages=50, top_k_links=25", flush=True)
 
         config = AdaptiveConfig(
             strategy="embedding",
-            
-            # SOLUTION 2: Use better multilingual model for legal documents
             embedding_model="sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
-            
-            # SOLUTION 1: AGGRESSIVE STOPPING PREVENTION
-            # Very low confidence threshold - don't stop early
-            confidence_threshold=0.05,  # 5% (was 0.7 / 70%)
-            embedding_min_confidence_threshold=0.02,  # 2% acceptance threshold
-            embedding_validation_min_score=0.1,  # Lower validation requirement
-            embedding_min_relative_improvement=0.01,  # 1% improvement keeps crawling (was 0.1)
-            
-            # SOLUTION 4: Better query expansion for legal domain
-            n_query_variations=20,  # Increased from 5 - generates more query variants
-            
-            # SOLUTION 5: Deeper crawling for legal documents
-            max_pages=request.max_pages or 50,  # Default 50 (was 20)
-            top_k_links=25,  # Increased from 15 - explore more links per page
-            
-            # SOLUTION 2: Better coverage parameters for complex legal docs
-            embedding_coverage_radius=0.35,  # Wider coverage area
-            embedding_k_exp=1.5,  # Lower exponential decay (less strict)
-            embedding_overlap_threshold=0.80,  # Allow more content variation
+            confidence_threshold=0.05,
+            embedding_min_confidence_threshold=0.02,
+            embedding_validation_min_score=0.1,
+            embedding_min_relative_improvement=0.01,
+            n_query_variations=20,
+            max_pages=request.max_pages or 50,
+            top_k_links=25,
+            embedding_coverage_radius=0.35,
+            embedding_k_exp=1.5,
+            embedding_overlap_threshold=0.80,
         )
         used_embedding_crawl = True
     else:
-        # Fallback to statistical strategy if use_embeddings=false
         print("Using STATISTICAL (BM25) strategy", flush=True)
-        print("  Force exploration: confidence_threshold=0.05, min_gain_threshold=0.01", flush=True)
         config = AdaptiveConfig(
             strategy="statistical",
-            confidence_threshold=0.05,  # Very low to force crawling
+            confidence_threshold=0.05,
             max_pages=request.max_pages or 50,
             top_k_links=25,
-            min_gain_threshold=0.01  # 1% minimum gain keeps crawling
+            min_gain_threshold=0.01
         )
         used_embedding_crawl = False
 
-    # SOLUTION 6: Better browser configuration for .asp file extraction
     browser_config = BrowserConfig(
         headless=True,
         verbose=False,
@@ -550,14 +576,25 @@ async def run_adaptive_crawl(
             query=request.query
         )
 
+        # FIX: Handle None/empty result
+        if not result:
+            return CrawlResponse(
+                success=False,
+                answer="Crawl returned no result.",
+                confidence=0.0,
+                pages_crawled=0,
+                sources=[],
+                message="Crawling failed - no result returned",
+                embedding_used=False
+            )
+
         # Get crawl statistics
-        confidence = adaptive.confidence
+        confidence = adaptive.confidence if hasattr(adaptive, 'confidence') else 0.0
         crawled_urls = result.crawled_urls if hasattr(result, 'crawled_urls') else []
         pages_crawled = len(crawled_urls)
 
         print(f"Crawl complete: {pages_crawled} pages, {confidence:.0%} confidence", flush=True)
 
-        # Print stats (if method exists)
         if hasattr(adaptive, 'print_stats'):
             adaptive.print_stats()
 
@@ -572,25 +609,26 @@ async def run_adaptive_crawl(
                 embedding_used=False
             )
 
-        # Get relevant content from knowledge base
-        relevant_pages = adaptive.get_relevant_content(top_k=25)  # Get more for re-ranking
+        # FIX: Use fallback to extract pages
+        relevant_pages = extract_pages_from_result(result)
+        if not relevant_pages:
+            relevant_pages = []
 
         strategy_name = "Embedding" if used_embedding_crawl else "BM25"
         print(f"\n{strategy_name} top pages (before re-ranking):", flush=True)
         for i, page in enumerate(relevant_pages[:5], 1):
-            print(f"  {i}. {page['score']:.0%} - {page['url']}", flush=True)
+            print(f"  {i}. {page.get('score', 0):.0%} - {page.get('url', 'unknown')}", flush=True)
 
         # Re-rank with OpenRouter embeddings if available
         embedding_used = False
         if embedding_client and relevant_pages:
             try:
-                print(f"\nRe-ranking with OpenRouter ({request.embedding_model})...", flush=True)
-                # SOLUTION 3: Better weighting applied in rerank_by_embeddings
+                print(f"\nRe-ranking with OpenRouter...", flush=True)
                 relevant_pages = await rerank_by_embeddings(
                     query=request.query,
                     pages=relevant_pages,
                     embedding_client=embedding_client,
-                    top_k=15  # Keep more pages after re-ranking
+                    top_k=15
                 )
                 embedding_used = True
 
@@ -632,7 +670,6 @@ async def run_adaptive_crawl(
         seen_urls = set()
         for page in relevant_pages[:15]:
             url = page.get('url', 'unknown')
-            # Skip duplicate URLs
             if url in seen_urls:
                 continue
             seen_urls.add(url)
@@ -645,7 +682,6 @@ async def run_adaptive_crawl(
                 source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)
             sources.append(source_info)
 
-        # Determine which strategy was actually used for the message
         crawl_strategy = "embedding" if used_embedding_crawl else "statistical"
 
         return CrawlResponse(
@@ -654,8 +690,10 @@ async def run_adaptive_crawl(
             confidence=round(confidence, 3),
             pages_crawled=pages_crawled,
             sources=sources,
-            message=f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence:.0%} confidence" +
-                    (" (with OpenRouter re-ranking)" if embedding_used else ""),
+            message=(
+                f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence:.0%} confidence" +
+                (" (with OpenRouter re-ranking)" if embedding_used else "")
+            ),
             embedding_used=embedding_used or used_embedding_crawl
         )
 
@@ -666,20 +704,15 @@ async def run_fallback_deep_crawl(
     embedding_client: Optional[OpenRouterEmbeddings],
     domain: str
 ) -> CrawlResponse:
-    """Fallback to deep crawling if AdaptiveCrawler is not available.
-    
-    Also applies SOLUTION 5: Deeper crawling with increased link exploration
-    """
+    """Fallback to deep crawling if AdaptiveCrawler is not available."""
 
     print("Using FALLBACK deep crawl (BestFirst strategy)", flush=True)
 
-    # Create domain filter
     domain_filter = DomainFilter(
         allowed_domains=[domain],
         blocked_domains=[]
     )
 
-    # Extract keywords from query
     stop_words = {
         'the', 'a', 'an', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
         'of', 'with', 'by', 'from', 'as', 'is', 'was', 'are', 'were', 'been',
@@ -687,7 +720,7 @@ async def run_fallback_deep_crawl(
         'could', 'should', 'may', 'might', 'must', 'can', 'this', 'that',
         'what', 'which', 'who', 'how', 'when', 'where', 'why', 'i', 'you',
         'show', 'get', 'find', 'give', 'me', 'my', 'your', 'want', 'need',
-        '我', '是', '在', '会', '被', '了', '吗', '嘛'  # Add common Chinese stop words
+        '我', '是', '在', '会', '被', '了', '吗', '嘛'
     }
     keywords = [
         word.lower() for word in request.query.split()
@@ -696,17 +729,15 @@ async def run_fallback_deep_crawl(
 
     print(f"Keywords: {keywords}", flush=True)
 
-    # Create keyword scorer
     url_scorer = KeywordRelevanceScorer(
         keywords=keywords,
         weight=0.9
     )
 
-    # SOLUTION 5: Create BestFirst strategy with deeper crawling
     strategy = BestFirstCrawlingStrategy(
-        max_depth=4,  # Increased from 3
+        max_depth=4,
         include_external=False,
-        max_pages=request.max_pages or 50,  # Increased from default
+        max_pages=request.max_pages or 50,
         filter_chain=FilterChain([domain_filter]),
         url_scorer=url_scorer
     )
@@ -717,7 +748,6 @@ async def run_fallback_deep_crawl(
         verbose=True
     )
 
-    # SOLUTION 6: Better browser configuration
     browser_config = BrowserConfig(
         headless=True,
         verbose=False,
@@ -730,7 +760,6 @@ async def run_fallback_deep_crawl(
             config=crawl_config
         )
 
-        # Handle results
         if isinstance(results, list):
             crawled_pages = results
         else:
@@ -752,7 +781,6 @@ async def run_fallback_deep_crawl(
                 embedding_used=False
             )
 
-        # Convert to standard format for re-ranking
         pages_for_ranking = []
         for result in successful_pages:
             url = result.url if hasattr(result, 'url') else str(result)
@@ -769,11 +797,9 @@ async def run_fallback_deep_crawl(
                     'score': 0.5
                 })
 
-        # Re-rank with embeddings if available
         embedding_used = False
         if embedding_client and pages_for_ranking:
             try:
-                # SOLUTION 3: Better weighting in re-ranking
                 pages_for_ranking = await rerank_by_embeddings(
                     query=request.query,
                     pages=pages_for_ranking,
@@ -787,7 +813,6 @@ async def run_fallback_deep_crawl(
         else:
             pages_for_ranking = pages_for_ranking[:15]
 
-        # Format context
         context = format_adaptive_context(pages_for_ranking)
 
         if not context.strip():
@@ -810,12 +835,10 @@ async def run_fallback_deep_crawl(
             api_key=deepseek_api_key
         )
 
-        # Prepare sources with deduplication
         sources = []
         seen_urls = set()
         for page in pages_for_ranking[:15]:
             url = page.get('url', 'unknown')
-            # Skip duplicate URLs
             if url in seen_urls:
                 continue
             seen_urls.add(url)
@@ -834,13 +857,16 @@ async def run_fallback_deep_crawl(
             confidence=0.5,
             pages_crawled=pages_crawled,
             sources=sources,
-            message=f"Deep crawl complete (SOLUTION 5 applied): {pages_crawled} pages (fallback mode)" +
-                    (" (with OpenRouter re-ranking)" if embedding_used else ""),
+            message=(
+                f"Deep crawl complete (SOLUTION 5 applied): {pages_crawled} pages (fallback mode)" +
+                (" (with OpenRouter re-ranking)" if embedding_used else "")
+            ),
             embedding_used=embedding_used
         )
 
 
 if __name__ == "__main__":
+    import asyncio
     import uvicorn
     port = int(os.environ.get("PORT", 8080))
     print(f"Starting server on port {port}...", flush=True)
