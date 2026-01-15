@@ -1,10 +1,7 @@
-
-
-
 """
 Crawl4AI Adaptive Crawler with LOCAL MULTILINGUAL EMBEDDING Strategy + OpenRouter Re-ranking + DeepSeek Reasoner
 
-VERSION 3.7.0 - SPA/JavaScript FIX
+VERSION 3.7.1 - SPA/JavaScript FIX + EXTRACTION FIXES
 
 ROOT CAUSE FIXES (identified via Context7 documentation):
 1. SPAFriendlyCrawler wrapper - AdaptiveCrawler doesn't accept CrawlerRunConfig,
@@ -12,6 +9,9 @@ ROOT CAUSE FIXES (identified via Context7 documentation):
    and automatically injects CrawlerRunConfig with wait_for, process_iframes, etc.
 2. Embedding model verification at startup - detects model loading failures early
 3. Verbose logging for debugging - helps trace content extraction issues
+4. FIXED: CrawlResult.markdown extraction - was looking for .content instead of .markdown.raw_markdown
+5. FIXED: Format string bugs - .0% formatter with manual multiplication
+6. FIXED: Early validation of extracted content - fail fast if KB extraction fails
 
 EMBEDDING STRATEGY (Semantic Crawling - NO API NEEDED!):
 - Uses LOCAL sentence-transformers/paraphrase-multilingual-mpnet-base-v2
@@ -34,7 +34,7 @@ RE-RANKING (optional, requires OPENROUTER_API_KEY):
 ANSWER GENERATION (requires DEEPSEEK_API_KEY):
 - DeepSeek-reasoner for comprehensive answers
 
-Version: 3.7.0 (SPA FIX - Context7 Verified)
+Version: 3.7.1 (SPA FIX + EXTRACTION FIXES - Context7 Verified)
 """
 
 import os
@@ -44,6 +44,7 @@ import numpy as np
 from contextlib import asynccontextmanager
 from typing import Optional, List
 from urllib.parse import urlparse
+import re
 
 import httpx
 from fastapi import FastAPI, HTTPException
@@ -238,6 +239,7 @@ class OpenRouterEmbeddings:
         if not texts:
             return []
 
+        total_wait = 0
         for attempt in range(self.max_retries):
             try:
                 async with httpx.AsyncClient(timeout=60.0) as client:
@@ -254,9 +256,10 @@ class OpenRouterEmbeddings:
                     )
 
                     if response.status_code == 429:  # Rate limited
-                        wait_time = 2 ** attempt  # Exponential backoff
-                        print(f"Rate limited. Waiting {wait_time}s before retry...", flush=True)
-                        await asyncio.sleep(wait_time)  # ✅ Now works with asyncio import
+                        wait_time = 2 ** attempt
+                        total_wait += wait_time
+                        print(f"Rate limited. Waiting {wait_time}s before retry (total wait: {total_wait}s)...", flush=True)
+                        await asyncio.sleep(wait_time)
                         continue
 
                     if response.status_code != 200:
@@ -282,8 +285,9 @@ class OpenRouterEmbeddings:
                     print(f"Timeout after {self.max_retries} attempts", flush=True)
                     raise
                 wait_time = 2 ** attempt
-                print(f"Timeout. Waiting {wait_time}s before retry...", flush=True)
-                await asyncio.sleep(wait_time)  # ✅ Now works with asyncio import
+                total_wait += wait_time
+                print(f"Timeout. Waiting {wait_time}s before retry (total wait: {total_wait}s)...", flush=True)
+                await asyncio.sleep(wait_time)
                 continue
 
         return []
@@ -383,6 +387,29 @@ async def rerank_by_embeddings(
 
 
 # ============================================================================
+# Helper: Language Detection
+# ============================================================================
+
+def detect_query_languages(query: str) -> dict:
+    """Detect languages in query (Chinese, English, etc.)."""
+    has_chinese = bool(re.search(r'[\u4e00-\u9fff]', query))
+    has_english = bool(re.search(r'[a-zA-Z]', query))
+    
+    languages = []
+    if has_chinese:
+        languages.append("Chinese")
+    if has_english:
+        languages.append("English")
+    
+    return {
+        "has_chinese": has_chinese,
+        "has_english": has_english,
+        "languages": languages,
+        "is_multilingual": len(languages) > 1
+    }
+
+
+# ============================================================================
 # FastAPI Application
 # ============================================================================
 
@@ -391,7 +418,7 @@ async def lifespan(app: FastAPI):
     """Lifespan event handler."""
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     print("=" * 60, flush=True)
-    print("Crawl4AI Adaptive Crawler v3.7.0 (SPA FIX) Starting...", flush=True)
+    print("Crawl4AI Adaptive Crawler v3.7.1 (SPA + EXTRACTION FIXES) Starting...", flush=True)
     print(f"AdaptiveCrawler Available: {ADAPTIVE_AVAILABLE}", flush=True)
     print(f"Deep Crawl Fallback Available: {DEEP_CRAWL_AVAILABLE}", flush=True)
     print(f"OpenRouter API Key: {'Configured' if openrouter_configured else 'NOT SET'}", flush=True)
@@ -406,7 +433,7 @@ async def lifespan(app: FastAPI):
         print(f"   The embedding strategy may not work correctly.", flush=True)
     print("=" * 60, flush=True)
 
-    print("FIXES APPLIED (v3.7.0):", flush=True)
+    print("FIXES APPLIED (v3.7.1):", flush=True)
     print("  ✓ FIX 1: SPAFriendlyCrawler wrapper for JavaScript sites", flush=True)
     print("    - Automatically injects CrawlerRunConfig to AdaptiveCrawler", flush=True)
     print("    - wait_for='css:body' ensures content renders", flush=True)
@@ -414,6 +441,9 @@ async def lifespan(app: FastAPI):
     print("    - delay_before_return_html=2.0s for JS execution", flush=True)
     print("  ✓ FIX 2: Embedding model verification at startup", flush=True)
     print("  ✓ FIX 3: Verbose logging for debugging", flush=True)
+    print("  ✓ FIX 4: CrawlResult.markdown extraction (was looking for .content)", flush=True)
+    print("  ✓ FIX 5: Format string bugs (:.0% with manual multiplication)", flush=True)
+    print("  ✓ FIX 6: Early validation of extracted content (fail fast)", flush=True)
     print("=" * 60, flush=True)
 
     print("EMBEDDING Strategy (LOCAL MULTILINGUAL - No API needed!):", flush=True)
@@ -433,8 +463,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Crawl4AI Adaptive Crawler",
-    description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + SPA/JavaScript support + OpenRouter re-ranking + DeepSeek reasoning - v3.7.0 SPA FIX",
-    version="3.7.0",
+    description="Intelligent web crawler with LOCAL MULTILINGUAL EMBEDDING strategy (50+ languages) + SPA/JavaScript support + OpenRouter re-ranking + DeepSeek reasoning - v3.7.1 with extraction fixes",
+    version="3.7.1",
     lifespan=lifespan
 )
 
@@ -488,6 +518,7 @@ Crawled Web Content:
 
 Based on the above content, provide a detailed and accurate answer to the query."""
 
+    total_wait = 0
     for attempt in range(max_retries):
         try:
             async with httpx.AsyncClient(timeout=180.0) as client:
@@ -510,8 +541,9 @@ Based on the above content, provide a detailed and accurate answer to the query.
 
                 if response.status_code == 429:  # Rate limited
                     wait_time = 2 ** attempt
-                    print(f"DeepSeek rate limited. Waiting {wait_time}s...", flush=True)
-                    await asyncio.sleep(wait_time)  # ✅ Now works with asyncio import
+                    total_wait += wait_time
+                    print(f"DeepSeek rate limited. Waiting {wait_time}s (total: {total_wait}s)...", flush=True)
+                    await asyncio.sleep(wait_time)
                     continue
 
                 if response.status_code != 200:
@@ -529,8 +561,9 @@ Based on the above content, provide a detailed and accurate answer to the query.
             if attempt == max_retries - 1:
                 raise HTTPException(status_code=504, detail="DeepSeek API timeout")
             wait_time = 2 ** attempt
-            print(f"DeepSeek timeout. Retrying in {wait_time}s...", flush=True)
-            await asyncio.sleep(wait_time)  # ✅ Now works with asyncio import
+            total_wait += wait_time
+            print(f"DeepSeek timeout. Retrying in {wait_time}s (total wait: {total_wait}s)...", flush=True)
+            await asyncio.sleep(wait_time)
 
     raise HTTPException(status_code=500, detail="Failed to get response from DeepSeek after retries")
 
@@ -552,11 +585,11 @@ def format_adaptive_context(relevant_pages: List[dict], max_chars: int = 25000) 
         # Truncate individual page content
         page_text = content[:5000] if len(content) > 5000 else content
 
-        # ✅ FIXED: Changed {score:.0%} to {score*100:.0f}%
+        # ✅ FIXED: Proper format string without double multiplication
         if embedding_score is not None:
-            score_info = f"Combined: {score*100:.0f}%, Semantic: {embedding_score*100:.0f}%"
+            score_info = f"Combined: {int(score * 100)}%, Semantic: {int(embedding_score * 100)}%"
         else:
-            score_info = f"Relevance: {score*100:.0f}%"
+            score_info = f"Relevance: {int(score * 100)}%"
 
         entry = f"""
 === Page {i} ({score_info}): {url} ===
@@ -577,171 +610,95 @@ def extract_pages_from_result(result) -> List[dict]:
     FIX: Extract pages from adaptive crawl result's knowledge base.
     
     CrawlState structure:
-    - result.knowledge_base: List of Document objects with extracted content
-    - result.crawled_urls: List of URLs crawled
-    - result.documents_with_terms: Dict mapping documents to extracted terms
+    - result.knowledge_base: List of CrawlResult objects
+    - Each CrawlResult has:
+      - .url: str
+      - .markdown: MarkdownGenerationResult object
+        - .raw_markdown: str (the actual content!)
+        - .fit_markdown: str (filtered content, if available)
+        - .fit_html: str (filtered HTML, if available)
+      - .extracted_content: str (optional fallback)
     """
     pages = []
     
-    print(f"\n>>> extract_pages_from_result() called", flush=True)
+    print(f"\n>>> Extracting pages from result", flush=True)
     
     try:
-        # The knowledge_base contains the actual extracted content
-        if hasattr(result, 'knowledge_base') and result.knowledge_base:
-            kb = result.knowledge_base
-            print(f"  ✓ Knowledge base exists with {len(kb)} items", flush=True)
-            
-            if isinstance(kb, list):
-                print(f"  Processing {len(kb)} knowledge base items...", flush=True)
-                
-                # Each item should have url and content
-                for i, doc in enumerate(kb):
-                    try:
-                        extracted_page = None
-                        
-                        if isinstance(doc, dict):
-                            # Already a dict
-                            print(f"    [{i}] Dict with keys: {list(doc.keys())}", flush=True)
-                            content = doc.get('content') or doc.get('text') or doc.get('markdown')
-                            
-                            if content:
-                                content_str = str(content).strip()
-                                if len(content_str) > 50:
-                                    extracted_page = {
-                                        'url': doc.get('url', f'doc_{i}'),
-                                        'content': content_str,
-                                        'score': float(doc.get('score', 0.5))
-                                    }
-                                    print(f"      ✓ Extracted: {len(extracted_page['content'])} chars from {extracted_page['url'][:60]}", flush=True)
-                                else:
-                                    print(f"      ✗ Content too short ({len(content_str)} chars)", flush=True)
-                            else:
-                                print(f"      ✗ Content is empty", flush=True)
-                        
-                        elif hasattr(doc, '__dict__'):
-                            # Object with attributes
-                            doc_type = type(doc).__name__
-                            print(f"    [{i}] Object type: {doc_type}", flush=True)
-                            
-                            # Try multiple content attributes
-                            content = None
-                            content_attr = None
-                            for attr_name in ['content', 'text', 'markdown', 'body', 'data', 'page_content']:
-                                if hasattr(doc, attr_name):
-                                    val = getattr(doc, attr_name, None)
-                                    if val and len(str(val).strip()) > 50:
-                                        content = val
-                                        content_attr = attr_name
-                                        print(f"      Found .{attr_name}: {len(str(val))} chars", flush=True)
-                                        break
-                            
-                            # Try to get URL
-                            url = None
-                            for url_attr in ['url', 'link', 'page_url', 'source']:
-                                if hasattr(doc, url_attr):
-                                    url = getattr(doc, url_attr, None)
-                                    if url:
-                                        print(f"      Found .{url_attr}: {url[:60]}", flush=True)
-                                        break
-                            
-                            if content:
-                                content_str = str(content).strip()
-                                extracted_page = {
-                                    'url': url or f'doc_{i}',
-                                    'content': content_str,
-                                    'score': float(getattr(doc, 'score', 0.5))
-                                }
-                                print(f"      ✓ Extracted: {len(extracted_page['content'])} chars", flush=True)
-                            else:
-                                attrs = [a for a in dir(doc) if not a.startswith('_')]
-                                print(f"      ✗ No content found. Attributes: {attrs[:15]}", flush=True)
-                        
-                        else:
-                            # Fallback: try string representation
-                            doc_type = type(doc).__name__
-                            print(f"    [{i}] Fallback for {doc_type}, trying str()", flush=True)
-                            content = str(doc)
-                            if len(content) > 50:
-                                extracted_page = {
-                                    'url': f'doc_{i}',
-                                    'content': content,
-                                    'score': 0.5
-                                }
-                                print(f"      ✓ Extracted: {len(extracted_page['content'])} chars from str()", flush=True)
-                            else:
-                                print(f"      ✗ str() content too short ({len(content)} chars)", flush=True)
-                        
-                        if extracted_page:
-                            pages.append(extracted_page)
-                    
-                    except Exception as e:
-                        print(f"    [{i}] ERROR: {str(e)}", flush=True)
-                        import traceback
-                        traceback.print_exc()
-            
-            else:
-                print(f"  ⚠️  KB is not a list, it's {type(kb).__name__}", flush=True)
+        # Check if knowledge_base exists
+        if not hasattr(result, 'knowledge_base') or not result.knowledge_base:
+            print(f"  ⚠️  No knowledge_base found in result", flush=True)
+            return []
         
-        else:
-            print(f"  ⚠️  No knowledge_base or it's empty", flush=True)
+        kb = result.knowledge_base
+        kb_len = len(kb) if hasattr(kb, '__len__') else 'unknown'
+        print(f"  ✓ Found {kb_len} items in knowledge base", flush=True)
         
-        # Fallback: Try to use get_relevant_content() method if available
-        if not pages and hasattr(result, 'get_relevant_content'):
-            print(f"  Trying fallback: get_relevant_content()...", flush=True)
+        # Iterate through knowledge base items (should be CrawlResult objects)
+        for i, doc in enumerate(kb):
             try:
-                relevant = result.get_relevant_content(top_k=25)
-                if relevant:
-                    print(f"    get_relevant_content() returned {len(relevant)} items", flush=True)
-                    for j, item in enumerate(relevant):
-                        try:
-                            if isinstance(item, dict):
-                                content = item.get('content') or item.get('text')
-                                if content:
-                                    content_str = str(content).strip()
-                                    if len(content_str) > 50:
-                                        pages.append({
-                                            'url': item.get('url', f'relevant_{j}'),
-                                            'content': content_str,
-                                            'score': float(item.get('score', 0.5))
-                                        })
-                                        print(f"      ✓ Added from get_relevant_content: {len(content_str)} chars", flush=True)
-                        except Exception as e:
-                            print(f"      Error processing item {j}: {e}", flush=True)
+                # Get URL
+                url = None
+                if hasattr(doc, 'url'):
+                    url = doc.url
+                else:
+                    url = f'doc_{i}'
+                
+                # Extract content from .markdown object (MarkdownGenerationResult)
+                content = None
+                content_source = None
+                
+                if hasattr(doc, 'markdown') and doc.markdown:
+                    md = doc.markdown
+                    
+                    # Try fit_markdown first (filtered content, more relevant)
+                    if hasattr(md, 'fit_markdown') and md.fit_markdown:
+                        content = md.fit_markdown
+                        content_source = "fit_markdown"
+                    # Fallback to raw_markdown
+                    elif hasattr(md, 'raw_markdown') and md.raw_markdown:
+                        content = md.raw_markdown
+                        content_source = "raw_markdown"
+                
+                # If no markdown, try extracted_content
+                if not content and hasattr(doc, 'extracted_content') and doc.extracted_content:
+                    content = doc.extracted_content
+                    content_source = "extracted_content"
+                
+                # Validate we have content
+                if not content:
+                    print(f"    [{i}] ✗ No content found for {url[:50]}", flush=True)
+                    continue
+                
+                # Convert to string and validate length
+                content_str = str(content).strip()
+                if len(content_str) < 50:
+                    print(f"    [{i}] ✗ Content too short ({len(content_str)} chars)", flush=True)
+                    continue
+                
+                # Add to pages
+                pages.append({
+                    'url': url,
+                    'content': content_str,
+                    'score': 0.5,
+                    'content_source': content_source
+                })
+                print(f"    [{i}] ✓ {len(content_str):>6} chars from {content_source:>15} - {url[:50]}", flush=True)
+            
             except Exception as e:
-                print(f"    get_relevant_content() failed: {e}", flush=True)
+                print(f"    [{i}] ✗ Error processing doc: {e}", flush=True)
+                import traceback
+                traceback.print_exc()
         
-        # Last resort: Log what we couldn't extract
-        if not pages:
-            print(f"\n  ❌ NO PAGES EXTRACTED!", flush=True)
-            if hasattr(result, 'crawled_urls') and result.crawled_urls:
-                print(f"  ℹ️  But {len(result.crawled_urls)} URLs were crawled:", flush=True)
-                crawled_urls_list = list(result.crawled_urls)[:5]
-                for url in crawled_urls_list:
-                    print(f"      - {url}", flush=True)
-            
-            if hasattr(result, 'documents_with_terms'):
-                dwt = result.documents_with_terms
-                print(f"  ℹ️  Documents with terms: {len(dwt) if dwt else 0}", flush=True)
-            
-            print(f"\n  DEBUGGING INFO:", flush=True)
-            print(f"    Result type: {type(result).__name__}", flush=True)
-            result_attrs = [a for a in dir(result) if not a.startswith('_')]
-            print(f"    Result attributes: {result_attrs[:20]}", flush=True)
-            
+        # Summary
+        total_chars = sum(len(p.get('content', '')) for p in pages)
+        print(f"  ✅ Successfully extracted {len(pages)} pages ({total_chars:,} chars total)", flush=True)
+    
     except Exception as e:
-        print(f"  ❌ EXCEPTION in extract_pages_from_result: {e}", flush=True)
+        print(f"  ❌ Exception in extract_pages_from_result: {e}", flush=True)
         import traceback
         traceback.print_exc()
     
-    # Final summary
-    if pages:
-        print(f"\n  ✅ Successfully extracted {len(pages)} pages", flush=True)
-        total_chars = sum(len(p.get('content', '')) for p in pages)
-        print(f"     Total content: {total_chars} chars across all pages", flush=True)
-    else:
-        print(f"\n  ⚠️  FINAL RESULT: 0 pages extracted", flush=True)
-    
-    print(f"<<< extract_pages_from_result() returning {len(pages)} pages\n", flush=True)
+    print(f"<<< Returning {len(pages)} pages\n", flush=True)
     
     return pages
 
@@ -751,21 +708,24 @@ async def root():
     """Service status endpoint."""
     openrouter_configured = bool(os.environ.get("OPENROUTER_API_KEY"))
     return {
-        "message": "Crawl4AI Adaptive Crawler v3.7.0 (SPA FIX) is running!",
-        "version": "3.7.0",
+        "message": "Crawl4AI Adaptive Crawler v3.7.1 (SPA + EXTRACTION FIXES) is running!",
+        "version": "3.7.1",
         "status": "✅ Ready",
         "adaptive_available": ADAPTIVE_AVAILABLE,
         "deep_crawl_fallback": DEEP_CRAWL_AVAILABLE,
         "openrouter_reranking": openrouter_configured,
         "embedding_model_verified": EMBEDDING_MODEL_VERIFIED,
-        "fixes_v3.7.0": [
+        "fixes_v3.7.1": [
             "✓ FIX: SPAFriendlyCrawler wrapper for JavaScript/SPA sites",
             "✓ FIX: Automatic CrawlerRunConfig injection to AdaptiveCrawler",
             "✓ FIX: wait_for='css:body' ensures content renders",
             "✓ FIX: process_iframes=True includes embedded content",
             "✓ FIX: delay_before_return_html=2.0s for JS execution",
             "✓ FIX: Embedding model verification at startup",
-            "✓ FIX: Verbose logging for debugging"
+            "✓ FIX: Verbose logging for debugging",
+            "✓ FIX 4: CrawlResult.markdown extraction (was looking for .content instead of .markdown.raw_markdown)",
+            "✓ FIX 5: Format string bugs (:.0% formatter with manual multiplication)",
+            "✓ FIX 6: Early validation of extracted content - fail fast if KB extraction fails"
         ],
         "previous_solutions": [
             "✓ Aggressive stopping prevention (confidence=0.05)",
@@ -779,6 +739,7 @@ async def root():
             "LOCAL multilingual embedding strategy",
             "SPA/JavaScript site support via SPAFriendlyCrawler",
             "sentence-transformers/paraphrase-multilingual-mpnet-base-v2",
+            "Chinese language support",
             "OpenRouter qwen3-embedding-8b (optional)",
             "Retry logic with exponential backoff",
             "Aggressive exploration prevents early termination",
@@ -816,8 +777,12 @@ async def adaptive_crawl(request: CrawlRequest):
         parsed_url = urlparse(request.start_url)
         domain = parsed_url.netloc
 
+        # Detect languages in query
+        lang_info = detect_query_languages(request.query)
+
         print(f"\n{'='*60}", flush=True)
         print(f"Query: {request.query}", flush=True)
+        print(f"Query Languages: {lang_info['languages']}", flush=True)
         print(f"Start URL: {request.start_url}", flush=True)
         print(f"Domain: {domain}", flush=True)
         print(f"Max pages: {request.max_pages}", flush=True)
@@ -928,14 +893,17 @@ async def run_adaptive_crawl(
 
         # VERBOSE DEBUG: Log crawl result details
         print(f"\n{'='*40} CRAWL RESULT DEBUG {'='*40}", flush=True)
-        print(f"Result type: {type(result)}", flush=True)
+        print(f"Result type: {type(result).__name__}", flush=True)
         
         if result:
             # Safely handle crawled_urls (it's a set, not a list)
             if hasattr(result, 'crawled_urls'):
-                print(f"✓ Crawled URLs count: {len(result.crawled_urls)}", flush=True)
+                crawled_urls_count = len(result.crawled_urls)
+                print(f"✓ Crawled URLs count: {crawled_urls_count}", flush=True)
                 crawled_urls_list = list(result.crawled_urls)[:5]
                 print(f"  Sample URLs: {crawled_urls_list}", flush=True)
+            else:
+                crawled_urls_count = 0
             
             # Check knowledge_base
             if hasattr(result, 'knowledge_base'):
@@ -954,25 +922,25 @@ async def run_adaptive_crawl(
                         # Inspect first item
                         if isinstance(kb_item, dict):
                             print(f"    Dict keys: {list(kb_item.keys())}", flush=True)
-                            for key in ['content', 'text', 'markdown', 'url']:
-                                if key in kb_item:
-                                    val = kb_item[key]
-                                    val_len = len(str(val)) if val else 0
-                                    print(f"      .{key}: {val_len} chars", flush=True)
                         else:
-                            # It's an object
+                            # It's an object (CrawlResult)
                             obj_type = type(kb_item).__name__
                             print(f"    Object type: {obj_type}", flush=True)
-                            attrs = [a for a in dir(kb_item) if not a.startswith('_')]
-                            print(f"    Attributes: {attrs[:15]}", flush=True)
                             
-                            # Check for content
-                            for attr in ['content', 'text', 'markdown', 'body']:
-                                if hasattr(kb_item, attr):
-                                    val = getattr(kb_item, attr, None)
-                                    if val:
-                                        val_len = len(str(val))
-                                        print(f"      .{attr}: {val_len} chars", flush=True)
+                            # Check for .markdown attribute
+                            if hasattr(kb_item, 'markdown'):
+                                md = kb_item.markdown
+                                print(f"    Has .markdown: {md is not None}", flush=True)
+                                if md:
+                                    md_type = type(md).__name__
+                                    print(f"      .markdown type: {md_type}", flush=True)
+                                    
+                                    for attr in ['raw_markdown', 'fit_markdown', 'fit_html']:
+                                        if hasattr(md, attr):
+                                            val = getattr(md, attr, None)
+                                            if val:
+                                                val_len = len(str(val))
+                                                print(f"        .{attr}: {val_len} chars", flush=True)
                 else:
                     print(f"  ⚠️ Knowledge base is EMPTY (None)", flush=True)
             
@@ -1019,7 +987,7 @@ async def run_adaptive_crawl(
         crawled_urls = result.crawled_urls if hasattr(result, 'crawled_urls') else []
         pages_crawled = len(crawled_urls)  # ✅ This works because len() works on sets too
 
-        print(f"Crawl complete: {pages_crawled} pages, {confidence:.0%} confidence", flush=True)
+        print(f"Crawl complete: {pages_crawled} pages, {int(confidence * 100)}% confidence", flush=True)
 
         if hasattr(adaptive, 'print_stats'):
             adaptive.print_stats()
@@ -1035,17 +1003,33 @@ async def run_adaptive_crawl(
                 embedding_used=False
             )
 
-        # FIX: Use fallback to extract pages
+        # FIX: Extract pages from knowledge base
         relevant_pages = extract_pages_from_result(result)
+        
+        # Early validation: if no pages extracted, fail fast
         if not relevant_pages:
-            relevant_pages = []
+            print(f"\n⚠️  CRITICAL: No pages extracted from knowledge base!", flush=True)
+            print(f"   Crawled URLs: {pages_crawled}", flush=True)
+            if hasattr(result, 'knowledge_base'):
+                kb_size = len(result.knowledge_base) if result.knowledge_base else 0
+                print(f"   Knowledge base size: {kb_size}", flush=True)
+            
+            return CrawlResponse(
+                success=False,
+                answer="Pages were crawled but content extraction failed. This may indicate an issue with the target website's structure or content encoding.",
+                confidence=confidence,
+                pages_crawled=pages_crawled,
+                sources=[],
+                message=f"EXTRACTION FAILURE: Crawled {pages_crawled} pages but extracted 0 pages from knowledge base",
+                embedding_used=False
+            )
 
         strategy_name = "Embedding" if used_embedding_crawl else "BM25"
         print(f"\n{strategy_name} top pages (before re-ranking):", flush=True)
         for i, page in enumerate(relevant_pages[:5], 1):
-            # ✅ FIXED: Changed {page.get('score', 0):.0%} to {score_val*100:.0f}%
-            score_val = page.get('score', 0)
-            print(f"  {i}. {score_val*100:.0f}% - {page.get('url', 'unknown')}", flush=True)
+            # ✅ FIXED: Proper format string
+            score_pct = int(page.get('score', 0) * 100)
+            print(f"  {i}. {score_pct}% - {page.get('url', 'unknown')}", flush=True)
 
         # Re-rank with OpenRouter embeddings if available
         embedding_used = False
@@ -1063,10 +1047,10 @@ async def run_adaptive_crawl(
                 print(f"After OpenRouter re-ranking:", flush=True)
                 for i, page in enumerate(relevant_pages[:5], 1):
                     emb_score = page.get('embedding_score', 0)
-                    # ✅ FIXED: Changed {page['score']:.0%} and {emb_score:.0%}
-                    combined_score = page['score'] * 100
-                    emb_score_pct = emb_score * 100
-                    print(f"  {i}. Combined: {combined_score:.0f}% (Semantic: {emb_score_pct:.0f}%) - {page['url']}", flush=True)
+                    # ✅ FIXED: Proper format string without double multiplication
+                    combined_pct = int(page['score'] * 100)
+                    emb_pct = int(emb_score * 100)
+                    print(f"  {i}. Combined: {combined_pct}% (Semantic: {emb_pct}%) - {page['url']}", flush=True)
             except Exception as e:
                 print(f"OpenRouter re-ranking failed: {e}, using crawl results", flush=True)
                 relevant_pages = relevant_pages[:15]
@@ -1075,23 +1059,28 @@ async def run_adaptive_crawl(
 
         # Format context for DeepSeek  
         context = format_adaptive_context(relevant_pages)  
+        
         if not context.strip():  
+            print(f"\n⚠️  WARNING: Formatted context is empty!", flush=True)
             return CrawlResponse(  
                 success=False,  
-                answer="Pages were crawled but no readable content was extracted.",  
+                answer="Pages were crawled and extracted but contain insufficient readable content.",  
                 confidence=confidence,  
                 pages_crawled=pages_crawled,  
                 sources=[],  
-                message="No content extracted",  
+                message="CONTENT VALIDATION FAILURE: Context formatting produced empty result",  
                 embedding_used=embedding_used  
             )  
-        print(f"\nContext length: {len(context)} chars", flush=True)  
+        
+        print(f"\nContext length: {len(context):,} chars", flush=True)  
         print("Generating answer with DeepSeek-reasoner...", flush=True)  
+        
         answer = await call_deepseek(  
             query=request.query,  
             context=context,  
             api_key=deepseek_api_key  
         )  
+        
         # Prepare sources with deduplication  
         sources = []  
         seen_urls = set()  
@@ -1107,8 +1096,10 @@ async def run_adaptive_crawl(
             if embedding_used and 'embedding_score' in page:  
                 source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)  
             sources.append(source_info)  
+        
         crawl_strategy = "embedding" if used_embedding_crawl else "statistical"  
-        # ✅ FIXED: Changed {confidence:.0%} to {confidence*100:.0f}%  
+        
+        # ✅ FIXED: Proper format string
         return CrawlResponse(  
             success=True,  
             answer=answer,  
@@ -1116,7 +1107,7 @@ async def run_adaptive_crawl(
             pages_crawled=pages_crawled,  
             sources=sources,  
             message=(  
-                f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {confidence*100:.0f}% confidence" +  
+                f"Adaptive crawl ({crawl_strategy}): {pages_crawled} pages, {int(confidence*100)}% confidence" +  
                 (" (with OpenRouter re-ranking)" if embedding_used else "")  
             ),  
             embedding_used=embedding_used or used_embedding_crawl  
@@ -1210,10 +1201,18 @@ async def run_fallback_deep_crawl(
         for result in successful_pages:
             url = result.url if hasattr(result, 'url') else str(result)
             content = ""
+            
+            # FIX: Extract from .markdown properly
             if hasattr(result, 'markdown') and result.markdown:
-                content = result.markdown
-            elif hasattr(result, 'text') and result.text:
-                content = result.text
+                md = result.markdown
+                if hasattr(md, 'fit_markdown') and md.fit_markdown:
+                    content = md.fit_markdown
+                elif hasattr(md, 'raw_markdown') and md.raw_markdown:
+                    content = md.raw_markdown
+            
+            # Fallback
+            if not content and hasattr(result, 'extracted_content') and result.extracted_content:
+                content = result.extracted_content
 
             if content and len(content) >= 50:
                 pages_for_ranking.append({
@@ -1251,7 +1250,7 @@ async def run_fallback_deep_crawl(
                 embedding_used=embedding_used
             )
 
-        print(f"Context length: {len(context)} chars", flush=True)
+        print(f"Context length: {len(context):,} chars", flush=True)
         print("Generating answer with DeepSeek-reasoner...", flush=True)
 
         answer = await call_deepseek(
@@ -1276,7 +1275,7 @@ async def run_fallback_deep_crawl(
                 source_info["semantic_score"] = round(page.get('embedding_score', 0), 3)
             sources.append(source_info)
 
-        # ✅ FIXED: Changed {confidence*100:.0f}% format
+        # ✅ FIXED: Proper format string
         return CrawlResponse(
             success=True,
             answer=answer,
