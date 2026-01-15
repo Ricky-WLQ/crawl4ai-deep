@@ -2,59 +2,75 @@ version: '3.8'
 
 services:
   crawl4ai:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    
-    image: crawl4ai:5.0.0
-    container_name: crawl4ai
+    # ============================================================================
+    # IMAGE CONFIGURATION
+    # ============================================================================
+    image: unclecode/crawl4ai:latest
+    container_name: crawl4ai-prod
+    pull_policy: always  # Always pull latest image for security patches
     
     # ============================================================================
     # PORT MAPPING
     # ============================================================================
     ports:
-      - "8080:8080"
+      - "11235:11235"
     
     # ============================================================================
     # ENVIRONMENT VARIABLES
     # ============================================================================
     environment:
-      # API Keys (use .env file for secrets)
+      # Core Settings
+      - PORT=11235
+      - LOG_LEVEL=${LOG_LEVEL:-INFO}
+      
+      # API Keys & Authentication
       - DEEPSEEK_API_KEY=${DEEPSEEK_API_KEY}
       - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
       - CRAWL_API_KEY=${CRAWL_API_KEY}
-      - REQUIRE_API_KEY=${REQUIRE_API_KEY:-false}
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - REQUIRE_API_KEY=${REQUIRE_API_KEY:-true}  # Enable auth in production
       
-      # Logging
-      - LOG_LEVEL=${LOG_LEVEL:-INFO}
-      - LOG_FILE=/app/logs/crawl4ai.log
-      - PORT=8080
-      
-      # Crawler configuration (adjust for your deployment)
+      # Crawler Configuration (Optimized for Production)
       - MAX_PAGES=${MAX_PAGES:-100}
       - MAX_DEPTH=${MAX_DEPTH:-3}
       - REQUEST_TIMEOUT_SECONDS=${REQUEST_TIMEOUT_SECONDS:-60}
       - MEMORY_THRESHOLD_MB=${MEMORY_THRESHOLD_MB:-500}
       - MAX_CONCURRENT_REQUESTS=${MAX_CONCURRENT_REQUESTS:-3}
+      - BROWSER_POOL_SIZE=${BROWSER_POOL_SIZE:-3}
       
-      # CORS
-      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      # Security & CORS
+      - CORS_ORIGINS=${CORS_ORIGINS:-https://yourdomain.com}  # Restrict in production
+      - ALLOWED_DOMAINS=${ALLOWED_DOMAINS:-}  # Optional domain whitelist
+      
+      # Performance Tuning
+      - CACHE_TTL_SECONDS=${CACHE_TTL_SECONDS:-3600}
+      - ENABLE_CACHING=${ENABLE_CACHING:-true}
+      - GZIP_ENABLED=${GZIP_ENABLED:-true}
     
     # ============================================================================
-    # VOLUMES
+    # VOLUMES - Persistent Data & Logs
     # ============================================================================
     volumes:
+      # Logs - persists across restarts
       - crawl4ai-logs:/app/logs
+      
+      # Browser cache - speeds up subsequent requests
       - crawl4ai-cache:/app/.cache
-      - crawl4ai-browsers:/app/.browsers
+      
+      # Browser data - maintains cookies/sessions
+      - crawl4ai-browser-data:/app/.browsers
+      
+      # Shared memory for Chromium (critical performance)
+      - /dev/shm:/dev/shm
     
     # ============================================================================
-    # SHARED MEMORY (Required for Chromium)
+    # SHARED MEMORY - REQUIRED FOR CHROMIUM
     # ============================================================================
     shm_size: 2gb
     
     # ============================================================================
-    # RESOURCE LIMITS
+    # RESOURCE LIMITS - Production-Grade Configuration
     # ============================================================================
     deploy:
       resources:
@@ -66,28 +82,45 @@ services:
           memory: 4g
     
     # ============================================================================
-    # RESTART POLICY
+    # RESTART POLICY - Auto-recovery
     # ============================================================================
     restart: unless-stopped
     
     # ============================================================================
-    # HEALTH CHECK
+    # HEALTH CHECK - Ensures service availability
     # ============================================================================
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      test: ["CMD", "curl", "-f", "http://localhost:11235/health"]
       interval: 30s
       timeout: 10s
       retries: 5
-      start_period: 120s
+      start_period: 120s  # Give container time to start
     
     # ============================================================================
-    # LOGGING
+    # LOGGING - Structured JSON logging with rotation
     # ============================================================================
     logging:
       driver: "json-file"
       options:
         max-size: "10m"
-        max-file: "3"
+        max-file: "10"
+        labels: "service=crawl4ai"
+    
+    # ============================================================================
+    # NETWORK & SECURITY
+    # ============================================================================
+    networks:
+      - crawl4ai-network
+    
+    # Optional: Add security options for hardened deployments
+    security_opt:
+      - no-new-privileges:true
+    
+    # ============================================================================
+    # ENVIRONMENT FILE
+    # ============================================================================
+    env_file:
+      - .env.production
 
 # ============================================================================
 # NAMED VOLUMES
@@ -95,7 +128,28 @@ services:
 volumes:
   crawl4ai-logs:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./logs
+  
   crawl4ai-cache:
     driver: local
-  crawl4ai-browsers:
+    driver_opts:
+      type: none
+      o: bind
+      device: ./.cache
+  
+  crawl4ai-browser-data:
     driver: local
+    driver_opts:
+      type: none
+      o: bind
+      device: ./.browsers
+
+# ============================================================================
+# NETWORKS
+# ============================================================================
+networks:
+  crawl4ai-network:
+    driver: bridge
